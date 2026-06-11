@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Runtime artifacts (live in ~/.config/gqrx, not the repo — listed for clarity)
+scanner.log
+scanner_settings.json
+
+# Third-party reference material is NOT redistributed here (copyright).
+# Keep frequency-reference PDFs/exports local-only.
+*.pdf
+/Frequency_Reference/
+reference/

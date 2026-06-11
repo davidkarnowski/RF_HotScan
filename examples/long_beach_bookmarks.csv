@@ -1,0 +1,92 @@
+# Tag name          ;  color
+LBC                 ; #808080
+LBPD                ; #1e90ff
+LBFD                ; #ff0000
+POLB                ; #20b2aa
+LBCC                ; #00a000
+LBUSD               ; #ffa500
+CSULB               ; #9932cc
+USCG                ; #ffd700
+LBT                 ; #ff69b4
+LBMH                ; #8b4513
+
+# Frequency ; Name                     ; Modulation          ;  Bandwidth; Tags
+   150775000; LB FD V-5D Fire Tac 5 Direct [D152]               ; Narrow FM           ;      10000; LBFD
+   151160000; LB FD V-3 Fire Tactical [D134]                    ; Narrow FM           ;      10000; LBFD
+   151235000; LB FD V-7D Fire Tac 7 Direct [D226]               ; Narrow FM           ;      10000; LBFD
+   151595000; CSULB General [D226]                              ; Narrow FM           ;      10000; CSULB
+   151955000; LBUSD Elementary School Ops                       ; Narrow FM           ;      10000; LBUSD
+   153770000; LB FD V-4 Lifeguards / Marine Tac [D143]          ; Narrow FM           ;      10000; LBFD
+   153800000; LB FD V-8D Fire Tac 8 Direct [D243]               ; Narrow FM           ;      10000; LBFD
+   153800000; LB Refuse Collection Division [PL 123.0]          ; Narrow FM           ;      10000; LBC
+   153815000; LB FD V-9D Fire Tac 9 Direct [D244]               ; Narrow FM           ;      10000; LBFD
+   153830000; LB FD V-6D Fire Tac 6 Direct [PL 131.8]           ; Narrow FM           ;      10000; LBFD
+   153920000; LB FD V-2 Fire Tactical [D155]                    ; Narrow FM           ;      10000; LBFD
+   153950000; LB FD V-1 Fire Dispatch [D132]                    ; Narrow FM           ;      10000; LBFD
+   153980000; LB Water Department Ch 2 [D116]                   ; Narrow FM           ;      10000; LBC
+   154515000; LBUSD Jordan High School                          ; Narrow FM           ;      10000; LBUSD
+   154540000; LBUSD Jordan High School                          ; Narrow FM           ;      10000; LBUSD
+   154600000; LBUSD Elementary School Ops                       ; Narrow FM           ;      10000; LBUSD
+   155040000; LB Water Department Ch 1 [D116]                   ; Narrow FM           ;      10000; LBC
+   155160000; LB FD Search and Rescue (SAR) [PL 131.8]          ; Narrow FM           ;      10000; LBFD
+   156250000; POLB Tugs (Marine 5A)                             ; Narrow FM           ;      16000; POLB
+   156300000; USCG Intership Safety (Marine 6)                  ; Narrow FM           ;      16000; USCG
+   156600000; POLB Port Ops / Local Rescue (Marine 12)          ; Narrow FM           ;      16000; POLB
+   156650000; USCG Bridge-to-Bridge In-Port (Marine 13)         ; Narrow FM           ;      16000; USCG
+   156700000; USCG San Pedro VTS (Marine 14)                    ; Narrow FM           ;      16000; USCG
+   156725000; POLB Pilots Secondary (Marine 74)                 ; Narrow FM           ;      16000; POLB
+   156800000; USCG Hailing & Distress (Marine 16)               ; Narrow FM           ;      16000; USCG
+   157075000; USCG Sector LA/LB Ops Secondary (Marine 81A)      ; Narrow FM           ;      16000; USCG
+   157100000; USCG Public Liaison (Marine 22A)                  ; Narrow FM           ;      16000; USCG
+   157175000; USCG Sector LA/LB Ops Primary (Marine 83A)        ; Narrow FM           ;      16000; USCG
+   451150000; LB Gas and Oil Department [P25 - no analog]       ; Narrow FM           ;      10000; LBC
+   453100000; LB PD U5 Car to Car [D065]                        ; Narrow FM           ;      10000; LBPD
+   453187500; LB PD TAC3 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   453225000; POLB Harbor Maintenance [D156]                    ; Narrow FM           ;      10000; POLB
+   453262500; LB PD TAC4 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   453300000; LB PD TAC5 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   453350000; LB PD U6 Detective [D071]                         ; Narrow FM           ;      10000; LBPD
+   453412500; LB PD TAC6 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   453550000; LB Local Govt 3 - Animal Care Services [D074]     ; Narrow FM           ;      10000; LBC
+   453700000; LB Local Govt 2 - Street Services [D073]          ; Narrow FM           ;      10000; LBC
+   453850000; LB Local Govt 1 - Refuse / Parking [D072]         ; Narrow FM           ;      10000; LBC
+   453912500; LB PD TAC7 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   453937500; LBCC 2 [D131]                                     ; Narrow FM           ;      15800; LBCC
+   457787500; LB Local Govt - Public Works simplex [PL 123.0]   ; Narrow FM           ;      10000; LBC
+   460062500; LB PD TAC8 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   460125000; LB PD U1 Dispatch South / Outside Access [D031]   ; Narrow FM           ;      10000; LBPD
+   460200000; LB PD U4 Dispatch West [D054]                     ; Narrow FM           ;      10000; LBPD
+   460212500; LB PD Tactical [D114]                             ; Narrow FM           ;      10000; LBPD
+   460225000; LB PD U2 Dispatch East [D032]                     ; Narrow FM           ;      10000; LBPD
+   460275000; POLB Harbor Security [D131]                       ; Narrow FM           ;      10000; POLB
+   460350000; LB PD U3 Dispatch North [D043]                    ; Narrow FM           ;      10000; LBPD
+   460500000; LB PD U7 Special Ops [D047]                       ; Narrow FM           ;      10000; LBPD
+   460575000; LB PD TAC9 [D114]                                 ; Narrow FM           ;      10000; LBPD
+   460600000; LB PD CTC1 Car to Car [D114]                      ; Narrow FM           ;      10000; LBPD
+   460625000; LB PD CTC2 Car to Car [D114]                      ; Narrow FM           ;      10000; LBPD
+   461925000; LBCC 6 [D223]                                     ; Narrow FM           ;      10000; LBCC
+   462012500; CSULB Operations 2 [D114]                         ; Narrow FM           ;      10000; CSULB
+   462025000; LBCC 7 [PL 156.7]                                 ; Narrow FM           ;      10000; LBCC
+   462137500; LBUSD Middle School Ops                           ; Narrow FM           ;      10000; LBUSD
+   462175000; LBUSD Polytechnic High School                     ; Narrow FM           ;      10000; LBUSD
+   462187500; LBCC 4 [D223]                                     ; Narrow FM           ;      10000; LBCC
+   463000000; LB Memorial MEDIC 1-F [PL 162.2]                  ; Narrow FM           ;      10000; LBMH
+   463025000; LB Memorial MEDIC 2-D [PL 151.4]                  ; Narrow FM           ;      10000; LBMH
+   463100000; LB Memorial MEDIC 5-D [PL 151.4]                  ; Narrow FM           ;      10000; LBMH
+   463437500; LBUSD Lakewood / Millikan High Schools            ; Narrow FM           ;      10000; LBUSD
+   463475000; LBCC 1 - Facilities [D343]                        ; Narrow FM           ;      15800; LBCC
+   464075000; CSULB Housing Services [D134]                     ; Narrow FM           ;      10000; CSULB
+   464437500; LBUSD High School Ops (secondary)                 ; Narrow FM           ;      10000; LBUSD
+   464525000; CSULB PD 3 / Events [PL 203.5]                    ; Narrow FM           ;      10000; CSULB
+   464650000; LBCC 9 [D174]                                     ; Narrow FM           ;      10000; LBCC
+   464775000; CSULB Operations 1 [D503]                         ; Narrow FM           ;      10000; CSULB
+   464925000; CSULB PD 2 [D503]                                 ; Narrow FM           ;      10000; CSULB
+   467137500; LBUSD Middle School Ops                           ; Narrow FM           ;      10000; LBUSD
+   469837500; CSULB Operations 3                                ; Narrow FM           ;      10000; CSULB
+   469962500; CSULB Operations 4                                ; Narrow FM           ;      10000; CSULB
+   470712500; CSULB PD 1 Dispatch [PL 203.5]                    ; Narrow FM           ;      10000; CSULB
+   482350000; LB PD TAC1 Tactical [D114]                        ; Narrow FM           ;      10000; LBPD
+   485350000; LB PD TAC2 Tactical [D114]                        ; Narrow FM           ;      10000; LBPD
+   508537500; LB Transit Bus Ops (DMR system)                   ; Narrow FM           ;      10000; LBT
+   935225000; LBUSD Security / Emergency Radio Net [D023]       ; Narrow FM           ;      10000; LBUSD
+   935225000; LBUSD School District Police [D026]               ; Narrow FM           ;      10000; LBUSD
