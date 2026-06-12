@@ -26,6 +26,8 @@ import time
 import math
 import threading
 
+import clock
+
 # Lazy heavy imports — only when the RTL backend is actually used.
 np = None
 signal = None
@@ -214,6 +216,14 @@ class RtlBackend:
         self._hold_t0 = 0.0
         self._meas = None                   # cached FMDemod for level reads
         self._demod = None                  # the live playback demod (for live volume)
+        # --- squelch-gating + transmission recording ---
+        self.mute_squelch = True            # silence the hold tail when below squelch
+        self.record_enabled = False
+        self._chan_meta = {}                # current held channel (freq/name/tag)
+        self._recorder = None               # lazy recorder.WavRecorder
+        self._record_log = None             # GUI log callback for recordings
+
+    SQUELCH_HYST = 2.5                       # dB hysteresis on the audio squelch gate
 
     # ---- device lifecycle ----
     def connect(self):
@@ -345,7 +355,18 @@ class RtlBackend:
                     samples, self.sample_rate, channel_hz - center,
                     self.channel_bw)
                 self._audio_live = True
-                aq.put_nowait(audio)
+                # squelch gate: is the signal above the channel threshold?
+                open_ = self._live_power >= (self._threshold - self.SQUELCH_HYST)
+                # record the UN-muted audio (only open blocks get written, so the
+                # WAV ends at the signal drop), then mute the hold tail for output
+                if self._recorder is not None and self.record_enabled:
+                    try:
+                        self._recorder.feed(audio, open_, clock.now_unix())
+                    except Exception:
+                        pass
+                out = audio if (open_ or not self.mute_squelch) \
+                    else np.zeros_like(audio)
+                aq.put_nowait(out)
             except _queue.Full:
                 pass                                  # output not draining; skip
 
@@ -491,16 +512,42 @@ class RtlBackend:
 
     # audio hooks the Scanner calls (GqrxClient has neither; GQRX makes its own
     # sound). These let the engine drive RTL audio on park/resume.
-    def on_hold(self, freq):
+    def on_hold(self, ch, thr):
+        self._chan_meta = ch
+        self._threshold = float(thr)            # squelch gate level for this channel
         self._audio_live = False
         self._hold_t0 = time.time()
-        self._live_power = self._threshold     # seed so first hold read isn't stale
+        self._live_power = self._threshold      # seed so first hold read isn't stale
+        if self.record_enabled and self._recorder is not None:
+            self._recorder.arm({"freq_hz": ch["freq"], "name": ch.get("name", ""),
+                                "tag": ch.get("tag", ""), "backend": "rtl"})
         self._playing = True
-        self.play_async(int(freq))
+        self.play_async(int(ch["freq"]))
 
     def on_resume(self):
         self._playing = False
+        if self._recorder is not None:
+            try:
+                self._recorder.finalize()        # close any open transmission WAV
+            except Exception:
+                pass
         self.stop_audio()
+
+    # ---- recording / squelch controls (GUI -> backend) ----
+    def set_mute(self, on):
+        self.mute_squelch = bool(on)
+
+    def set_record(self, on):
+        self.record_enabled = bool(on)
+        if on and self._recorder is None:
+            import recorder
+            self._recorder = recorder.WavRecorder(
+                log=self._record_log or (lambda *_a: None))
+
+    def set_record_log(self, fn):
+        self._record_log = fn
+        if self._recorder is not None:
+            self._recorder.log = fn
 
 
 # --------------------------------------------------------------------------

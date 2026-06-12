@@ -139,6 +139,28 @@ level source (e.g. the heatmap's `window_power_dbfs`), keep it on a comparable
 scale or document the offset — thresholds calibrated on one don't transfer to a
 differently-scaled one.
 
+### Time base — use `clock.py` everywhere
+`clock.py` (stdlib) is the single time source shared by the scanner, heatmap, and
+recorder: `now_unix()` (UTC epoch float), `mono()` (durations), `utc_iso(t)` /
+`local_iso(t)` / `now_iso()`, `file_stamp(t)` (compact UTC for filenames). Rule:
+**persist UTC epoch; derive ISO for display.** Durations come from sample counts
+or `mono()` deltas, never from subtracting two wall-clock reads. The heatmap
+stamps each `power` frame `t_unix` (UTC epoch, capture start) + `t_dur_ms` (span)
+and adds `iso` to `emit_event`; keep that convention.
+
+### Audio squelch-gating + transmission recording (RTL only)
+- `RtlBackend.on_hold(ch, thr)` receives the channel dict + its squelch threshold.
+  In `listen`'s `iq_cb`, `open_ = live_power >= thr - SQUELCH_HYST` is the single
+  "signal present" decision. With `mute_squelch`, closed blocks output silence
+  (no static on the hold-after-loss tail).
+- `recorder.py`: `WavRecorder` writes 48 kHz/16-bit mono WAVs with CLEAN CUTS —
+  only `open_` blocks are written, so the WAV ends at the signal drop. Metadata
+  goes to `RecordingsDB` (`recordings.sqlite`, same conventions as `HeatmapDB`) +
+  one `recordings.events.jsonl` line; WAVs live in `~/.config/gqrx/recordings/`.
+  Sample-accurate stop time = `start + n_frames/48000`. A future playback panel
+  reads `RecordingsDB.list()/get()` and plays `wav_path`.
+- GQRX backend has no audio samples → no `on_hold`, no recording (control hidden).
+
 ## Things that are intentionally NOT done (GQRX backend)
 
 - No tone (CTCSS/DPL) squelch (GQRX remote-protocol limitation; the RTL backend

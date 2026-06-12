@@ -33,6 +33,8 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+import clock
+
 # Optional direct RTL-SDR backend (needs numpy/scipy/sounddevice/pyrtlsdr — run
 # the app from the project .venv to enable it). The GQRX path stays dependency-free.
 try:
@@ -69,7 +71,8 @@ logger.setLevel(logging.DEBUG)
 if not logger.handlers:
     _fh = logging.FileHandler(LOGFILE, mode="a")
     _fh.setFormatter(logging.Formatter(
-        "%(asctime)s.%(msecs)03d %(levelname)-5s %(message)s", "%H:%M:%S"))
+        "%(asctime)s.%(msecs)03d %(levelname)-5s %(message)s",
+        "%Y-%m-%dT%H:%M:%S"))    # full ISO date+time
     logger.addHandler(_fh)
 logger.info("=" * 60)
 logger.info("==== scanner session start ====")
@@ -372,6 +375,8 @@ class Scanner:
             "settle_ms": 350,   # dwell per channel; must cover GQRX's ~360 ms
                                 # meter lag or signals are read 2-3 channels late
             "hold_s": 3.0,
+            "record": False,        # record transmissions to WAV (RTL only)
+            "mute_squelch": True,   # silence the hold tail below squelch (RTL)
             "priority_interval": 6.0,
         }
         self.band_floor = {}
@@ -630,9 +635,10 @@ class Scanner:
                  f"({ch['freq']/1e6:.4f} MHz)")
         self._verify(ch)
         # Backends that produce their own audio on park (RTL) start here; GQRX
-        # makes sound itself and has no on_hold hook.
+        # makes sound itself and has no on_hold hook. Pass the channel + its
+        # squelch threshold so the backend can gate/record the transmission.
         if hasattr(self.client, "on_hold"):
-            self.client.on_hold(ch["freq"])
+            self.client.on_hold(ch, thr)
         try:
             self._hold_loop(ch, priority, now)
         finally:
@@ -991,6 +997,9 @@ class ScannerGUI:
         self.lbl_sig = tk.Label(right, text="-- dBFS", bg=PANEL, fg=FG,
                                 font=("Helvetica", 14))
         self.lbl_sig.pack(side="top", anchor="e", pady=(6, 0))
+        self.lbl_clock = tk.Label(right, text="", bg=PANEL, fg=MUTED,
+                                  font=("Menlo", 11))
+        self.lbl_clock.pack(side="top", anchor="e", pady=(6, 0))
 
         meter_wrap = tk.Frame(root, bg=BG)
         meter_wrap.pack(fill="x", padx=10)
@@ -1131,6 +1140,24 @@ class ScannerGUI:
             value=self.scanner.get_cfg("priority_interval"))
         self._slider(p, "Priority interval", self.prio_int, 2, 30, "s",
                      self._apply_priority)
+
+        # RECORD section — RTL (direct) backend only (it owns the audio samples).
+        # Kept last so _apply_backend_ui can hide it without reordering anything.
+        self._record_section = tk.Frame(p, bg=PANEL)
+        self._record_section.pack(fill="x")
+        self._section(self._record_section, "RECORD")
+        self.var_record = tk.BooleanVar(value=self.scanner.get_cfg("record"))
+        ttk.Checkbutton(self._record_section, text="Record transmissions (WAV)",
+                        variable=self.var_record,
+                        command=self._apply_record).pack(anchor="w", padx=12)
+        self.var_mute = tk.BooleanVar(value=self.scanner.get_cfg("mute_squelch"))
+        ttk.Checkbutton(self._record_section, text="Mute squelch tail",
+                        variable=self.var_mute,
+                        command=self._apply_record).pack(anchor="w", padx=12)
+        tk.Label(self._record_section,
+                 text="48 kHz mono WAV → ~/.config/gqrx/recordings",
+                 bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
+                                                                 padx=12)
 
     def _slider(self, parent, label, var, lo, hi, unit, cb):
         f = tk.Frame(parent, bg=PANEL)
@@ -1299,6 +1326,13 @@ class ScannerGUI:
         else:
             self._settle_frame.pack(fill="x", padx=12, pady=(6, 0),
                                     before=self._hold_frame)
+        # RECORD is RTL-only (GQRX backend exposes no audio samples). It's the
+        # last section in the panel, so hiding/showing doesn't reorder anything.
+        if rtl:
+            self._record_section.pack(fill="x")
+            self._apply_record()      # push current record/mute to the backend
+        else:
+            self._record_section.pack_forget()
 
     def _open_setup(self):
         if self._backend_kind == "rtl":
@@ -1373,6 +1407,16 @@ class ScannerGUI:
 
     def _apply_priority(self, _=None):
         self.scanner.set_cfg(priority_interval=self.prio_int.get())
+
+    def _apply_record(self):
+        rec = bool(self.var_record.get())
+        mute = bool(self.var_mute.get())
+        self.scanner.set_cfg(record=rec, mute_squelch=mute)
+        c = self.client
+        if hasattr(c, "set_record"):
+            c.set_record_log(self.scanner.log)
+            c.set_record(rec)
+            c.set_mute(mute)
 
     # ---- RTL-SDR device setup (sample rate / ppm; reopens the dongle) ----
     def _open_sdr_setup(self):
@@ -1667,6 +1711,7 @@ class ScannerGUI:
 
         self.btn_start.config(text="⏸ Pause" if self.scanner.run.is_set()
                               else "▶ Scan")
+        self.lbl_clock.config(text=clock.now_iso()[:19])    # wall clock (no ms)
         self._save_counter += 1
         if self._save_counter >= 25:        # ~ every 3 s, persist if changed
             self._save_counter = 0
@@ -1744,7 +1789,7 @@ class ScannerGUI:
             return
         c = self.scanner.cfg
         for k in ("squelch_mode", "global_sql", "auto_margin", "settle_ms",
-                  "hold_s", "priority_interval"):
+                  "hold_s", "priority_interval", "record", "mute_squelch"):
             if k in d:
                 c[k] = d[k]
         # clamp global squelch to the slider's range so a bad/stale value (e.g.
@@ -1767,7 +1812,8 @@ class ScannerGUI:
     def _settings_dict(self):
         c = self.scanner.cfg
         d = {k: c[k] for k in ("squelch_mode", "global_sql", "auto_margin",
-                               "settle_ms", "hold_s", "priority_interval")}
+                               "settle_ms", "hold_s", "priority_interval",
+                               "record", "mute_squelch")}
         d["enabled_tags"] = sorted(c["enabled_tags"])
         d["lockout"] = sorted(c["lockout"])
         d["priority_freqs"] = sorted(c["priority_freqs"])
