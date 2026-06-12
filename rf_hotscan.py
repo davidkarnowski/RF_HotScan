@@ -1207,6 +1207,10 @@ class ScannerGUI:
                    command=self._clear_all_tags).pack(side="right", padx=2)
         ttk.Button(hdr, text="All", width=6,
                    command=self._select_all_tags).pack(side="right", padx=2)
+        # how many channels the filtered list will actually scan (deduped)
+        self.lbl_count = tk.Label(hdr, text="", bg=BG, fg=ACCENT,
+                                  font=("Helvetica", 10, "bold"))
+        self.lbl_count.pack(side="right", padx=(0, 10))
         wrap = tk.Frame(parent, bg=BG)
         wrap.pack(fill="x", pady=(2, 8))
         enabled = self.scanner.get_cfg("enabled_tags")
@@ -1747,6 +1751,11 @@ class ScannerGUI:
         self.btn_start.config(text="⏸ Pause" if self.scanner.run.is_set()
                               else "▶ Scan")
         self.lbl_clock.config(text=clock.now_iso()[:19])    # wall clock (no ms)
+        # channels actually in the scan rotation (after tag filter, lockout,
+        # disabled, and dedupe-by-frequency)
+        n = len(self.scanner.active_list())
+        total = len({c["freq"] for c in self.chans})
+        self.lbl_count.config(text=f"scanning {n}/{total} ch")
         self._save_counter += 1
         if self._save_counter >= 25:        # ~ every 3 s, persist if changed
             self._save_counter = 0
