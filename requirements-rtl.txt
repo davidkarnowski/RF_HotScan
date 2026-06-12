@@ -1,0 +1,10 @@
+# Optional dependencies for the direct RTL-SDR backend (rtl_backend.py).
+# The GQRX-remote path (rf_hotscan.py) needs NONE of these — it is stdlib-only.
+#
+# Native prerequisite (Homebrew):  brew install rtl-sdr
+# Then:  python3 -m venv .venv && .venv/bin/pip install -r requirements-rtl.txt
+# (or just run ./setup_rtl_env.sh which also applies the pyrtlsdr compat patch)
+numpy>=1.26
+scipy>=1.11
+sounddevice>=0.4
+pyrtlsdr>=0.3
