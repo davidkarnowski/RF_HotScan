@@ -1919,6 +1919,48 @@ class ScannerGUI:
         self.root.destroy()
 
 
+class SdrShareCoordinator:
+    """Shares the single RTL dongle between the Scanner and Heatmap tabs.
+
+    When the Heatmap *executes* a capture it borrows the Scanner's already-
+    connected RtlBackend and pauses the Scanner's SDR use; when the capture ends
+    the Scanner resumes. Pause/resume is tied to capture execution, NOT to which
+    tab is visible. If the Scanner is on GQRX (or RTL isn't connected), there is
+    nothing to borrow and the heatmap opens its own dongle."""
+
+    def __init__(self, app):
+        self.app = app
+        self._was_running = False
+        self._paused = False
+
+    def begin_external_use(self, label):
+        sc = self.app.scanner
+        client = sc.client
+        if not (RTL_AVAILABLE and isinstance(client, rtl_backend.RtlBackend)
+                and client.connected):
+            return None                       # GQRX / not connected -> own dongle
+        self._was_running = sc.run.is_set()
+        sc.run.clear()                        # pause scanning (no more device hops)
+        for stop in ("on_resume", "stop_audio"):   # quiesce any held-channel audio
+            try:
+                getattr(client, stop)()
+            except Exception:
+                pass
+        self._paused = True
+        sc.log("Heatmap capture: paused scan, lent the RTL dongle (%s)" % label)
+        return client
+
+    def end_external_use(self):
+        if not self._paused:
+            return
+        self._paused = False
+        sc = self.app.scanner
+        if self._was_running:
+            sc.run.set()                      # resume scanning if it had been on
+        sc.log("Heatmap capture finished: resumed scan" if self._was_running
+               else "Heatmap capture finished: Scanner idle")
+
+
 def main():
     root = tk.Tk()
     nb = ttk.Notebook(root)
@@ -1926,12 +1968,12 @@ def main():
 
     scan_tab = ttk.Frame(nb)
     nb.add(scan_tab, text="  Scanner  ")
-    ScannerGUI(root, container=scan_tab)        # applies the dark ttk theme
+    app = ScannerGUI(root, container=scan_tab)  # applies the dark ttk theme
 
     # Heatmap tab — additive; degrades gracefully if its (lazy) deps are absent.
     try:
         import heatmap
-        hm_tab = heatmap.HeatmapTab(nb)
+        hm_tab = heatmap.HeatmapTab(nb, sdr_coordinator=SdrShareCoordinator(app))
         nb.add(hm_tab, text="  Heatmap  ")
     except Exception:
         logger.error("heatmap tab unavailable:\n%s", traceback.format_exc())

@@ -199,7 +199,50 @@ class FMDemod:
         return np.tanh(d * ramp * self.volume).astype(np.float32)
 
 
+# --------------------------------------------------------------------------
+# Single-owner dongle coordination (AGENTS.md "Shared-dongle invariant").
+# The RTL dongle is a single-owner USB device: GQRX, the scanner's RtlBackend,
+# and the heatmap's RtlBackend must not hold it at once. connect() takes
+# process-wide ownership; a second owner gets a clear DongleBusy rather than a
+# cryptic libusb error or a corrupted next tune.
+# --------------------------------------------------------------------------
+_owner_lock = threading.Lock()
+_owner = None              # the RtlBackend instance currently holding the dongle
+_owner_label = ""
+
+
+class DongleBusy(RuntimeError):
+    """Raised when a second owner tries to open the already-held RTL dongle."""
+
+
+def dongle_owner():
+    """Label of the current dongle owner, or '' if the dongle is free."""
+    return _owner_label
+
+
+def _acquire_dongle(inst, label):
+    global _owner, _owner_label
+    with _owner_lock:
+        if _owner is not None and _owner is not inst:
+            raise DongleBusy(
+                "RTL dongle already owned by '%s' — free it first "
+                "(switch the Scanner to GQRX, or stop the other RTL user)."
+                % (_owner_label or "another owner"))
+        _owner = inst
+        _owner_label = label
+
+
+def _release_dongle(inst):
+    global _owner, _owner_label
+    with _owner_lock:
+        if _owner is inst:
+            _owner = None
+            _owner_label = ""
+
+
 class RtlBackend:
+    owner_label = "scanner-rtl"            # overridden by other owners (e.g. heatmap)
+
     def __init__(self, sample_rate=SAMPLE_RATE, gain=40.0, ppm=0,
                  sweep_nsamp=1 << 16):
         _lazy_imports()
@@ -237,21 +280,26 @@ class RtlBackend:
     # ---- device lifecycle ----
     def connect(self):
         self.stop_audio()
-        with self.lock:
-            if self.sdr is not None:           # idempotent: reopen with current params
-                try:
-                    self.sdr.close()
-                except Exception:
-                    pass
-                self.sdr = None
-            self.sdr = RtlSdr()
-            self.sdr.sample_rate = self.sample_rate
-            if self.ppm:
-                self.sdr.freq_correction = self.ppm
-            self.sdr.gain = self.gain            # fixed gain => stable dBFS
-            # prime the tuner
-            self.sdr.center_freq = 462_000_000
-            self.sdr.read_samples(2048)
+        _acquire_dongle(self, self.owner_label)   # single-owner; raises DongleBusy
+        try:
+            with self.lock:
+                if self.sdr is not None:       # idempotent: reopen with current params
+                    try:
+                        self.sdr.close()
+                    except Exception:
+                        pass
+                    self.sdr = None
+                self.sdr = RtlSdr()
+                self.sdr.sample_rate = self.sample_rate
+                if self.ppm:
+                    self.sdr.freq_correction = self.ppm
+                self.sdr.gain = self.gain        # fixed gain => stable dBFS
+                # prime the tuner
+                self.sdr.center_freq = 462_000_000
+                self.sdr.read_samples(2048)
+        except Exception:
+            _release_dongle(self)              # don't hold ownership on a failed open
+            raise
 
     def close(self):
         self.stop_audio()
@@ -261,6 +309,7 @@ class RtlBackend:
                     self.sdr.close()
                 finally:
                     self.sdr = None
+        _release_dongle(self)
 
     @property
     def connected(self):
