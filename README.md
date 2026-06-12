@@ -191,25 +191,32 @@ bookmark in GQRX, the scanner can sweep.
 
 The repo ships a ready-to-use example at
 [`examples/long_beach_bookmarks.csv`](examples/long_beach_bookmarks.csv) — a
-**city-monitoring set** for Long Beach, CA. Rather than a handful of random
-frequencies, it is organized to cover *one city's* conventional analog radio
-landscape across its public agencies, so you can drop it in and immediately
-scan — or heatmap — what a whole city is saying on the air.
+**city-monitoring set** for Long Beach, CA, plus the surrounding amateur-radio
+landscape. Rather than a handful of random frequencies, it is organized to cover
+*one city's* conventional analog radio across its public agencies (and the local
+ham bands), so you can drop it in and immediately scan — or heatmap — what a whole
+city is saying on the air.
 
-- **79 channels across 10 agency tags**, spanning VHF/UHF (≈150–935 MHz):
+- **123 channels across 11 tags** — 10 public-safety / civic agencies plus
+  amateur radio — spanning VHF/UHF (≈145–935 MHz):
 
-  | Tag | Agency / service | Tag | Agency / service |
+  | Tag | Service | Tag | Service |
   | --- | --- | --- | --- |
   | `LBPD` | Police | `LBFD` | Fire / lifeguard / marine |
   | `POLB` | Port of Long Beach | `USCG` | Coast Guard (harbor) |
   | `LBC` | City gov / utilities / works | `LBT` | Transit |
   | `LBUSD` | Unified School District | `CSULB` | Cal State Long Beach |
   | `LBCC` | City College | `LBMH` | Memorial paramedic base-hospital |
+  | `HAM` | Amateur radio (2 m / 1.25 m / 70 cm) | | |
 
-- **Tag-per-agency, color-coded**, so you can filter the scan (or read the
-  heatmap) by service — watch just police + fire, or everything at once.
-- **Tones carried in channel names** (`[D031]`, `[PL 151.4]`) as a reference,
-  and **analog FM only** (digital P25/DMR/NXDN are noted but not demodulable).
+- **Tag-per-service, color-coded**, so you can filter the scan (or read the
+  heatmap) by service — watch just police + fire, just ham, or everything at once.
+- **Amateur radio (`HAM`)** — area 2 m / 1.25 m / 70 cm repeaters plus the
+  national **FM simplex calling** channels and the full 15 kHz **2 m simplex
+  grid** (146.520 national calling, 146.535, 146.550, … through 147.570).
+- **Tones carried in channel names** (`[D031]`, `[PL 151.4]`, repeater shifts like
+  `[-0.6]`) as a reference, and **analog FM only** (digital P25/DMR/NXDN are noted
+  but not demodulable).
 
 **Use it:** copy it into place as GQRX's bookmark file, then launch:
 
@@ -269,7 +276,13 @@ followed a few deliberate conventions:
   | `USCG` | Coast Guard Sector LA–Long Beach + harbor marine |
   | `LBT` | Long Beach Transit |
   | `LBMH` | Long Beach Memorial paramedic base-hospital channels |
+  | `HAM` | Amateur radio — area 2 m / 1.25 m / 70 cm repeaters + FM simplex |
 
+- **Amateur radio (`HAM`).** Area repeaters carry their callsign and shift/tone
+  in the name (e.g. `K6CHE Long Beach [PL 156.7 +0.6]`); the FM simplex calling
+  channels and the full 15 kHz 2 m simplex grid (146.520 national calling →
+  147.570) are included per the ARRL band plan. Repeater **outputs** are listed
+  (what you hear); the `[±0.6]` / `[-5]` shift is reference only.
 - **CTCSS/DPL tones embedded in the channel name** (e.g. `[D031]` = DPL 031,
   `[PL 151.4]` = 151.4 Hz CTCSS). GQRX bookmarks have no tone field, and the
   remote protocol can't gate on tone, so the tone is carried in the name as a
