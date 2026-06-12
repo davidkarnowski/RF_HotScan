@@ -33,6 +33,16 @@ import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
+# Optional direct RTL-SDR backend (needs numpy/scipy/sounddevice/pyrtlsdr — run
+# the app from the project .venv to enable it). The GQRX path stays dependency-free.
+try:
+    import rtl_backend
+    rtl_backend._lazy_imports()        # force numpy/scipy/rtlsdr now so the flag is honest
+    RTL_AVAILABLE = True
+except Exception:
+    rtl_backend = None
+    RTL_AVAILABLE = False
+
 BOOKMARKS = os.path.expanduser("~/.config/gqrx/bookmarks.csv")
 SETTINGS = os.path.expanduser("~/.config/gqrx/scanner_settings.json")
 LOGFILE = os.path.expanduser("~/.config/gqrx/scanner.log")
@@ -142,6 +152,8 @@ def contrast_fg(hexcolor):
 # GQRX remote-control client
 # --------------------------------------------------------------------------
 class GqrxClient:
+    recommended_settle_ms = 350      # GQRX's smoothed meter lags ~360 ms
+
     def __init__(self, host=HOST, port=PORT):
         self.host, self.port = host, port
         self.sock = None
@@ -517,6 +529,12 @@ class Scanner:
                     time.sleep(0.3)
                     continue
 
+                # Fast path: backends that can read many channels per capture
+                # (RTL channelized sweep) detect a whole sweep at once.
+                if hasattr(self.client, "sweep"):
+                    self._sweep_pass(lst)
+                    continue
+
                 for ch in lst:
                     if not self.run.is_set() or not self.alive:
                         break
@@ -551,6 +569,42 @@ class Scanner:
                          level=logging.ERROR)
                 time.sleep(0.3)
 
+    def _sweep_pass(self, lst):
+        """Channelized fast path: read every active channel's level from a few
+        wideband captures (RTL), then hold on the strongest channel over its
+        threshold. Detection of all 77 channels takes ~1 s instead of ~30 s."""
+        freqs = [c["freq"] for c in lst]
+        try:
+            powers, nwin = self.client.sweep(freqs)
+        except (ConnectionError, OSError) as e:
+            logger.warning("sweep failed: %s", e)
+            self._handle_disconnect()
+            return
+        self._hops += len(freqs)
+        by_freq = {c["freq"]: c for c in lst}
+        active = [(by_freq[f], p) for f, p in powers.items()
+                  if f in by_freq and p >= self.effective_threshold(f)]
+        logger.debug("SWEEP %d ch / %d windows  active=%d  max=%.1f dBFS",
+                     len(freqs), nwin, len(active),
+                     max(powers.values()) if powers else -200)
+        if active:
+            pf = self.get_cfg("priority_freqs")
+            prio = [(c, p) for c, p in active if c["freq"] in pf]
+            ch, p = max(prio or active, key=lambda cp: cp[1])
+            now = time.time()
+            self.last_active[ch["freq"]] = now
+            with self.lock:
+                self.last_active = dict(self.last_active)
+            self._set_ui(state="SCANNING", cur=ch, strength=p,
+                         thresh=self.effective_threshold(ch["freq"]))
+            self._hold(ch)
+        elif powers:
+            top = max(powers, key=powers.get)        # show the strongest on the meter
+            self._set_ui(state="SCANNING", cur=by_freq.get(top),
+                         strength=powers[top],
+                         thresh=self.effective_threshold(top))
+            time.sleep(0.02)
+
     def _check_priority(self, pf):
         for freq in sorted(pf):
             ch = self._channel_by_freq(freq)
@@ -575,6 +629,18 @@ class Scanner:
         self.log(f"{'PRIORITY ' if priority else ''}HOLD {ch['name']} "
                  f"({ch['freq']/1e6:.4f} MHz)")
         self._verify(ch)
+        # Backends that produce their own audio on park (RTL) start here; GQRX
+        # makes sound itself and has no on_hold hook.
+        if hasattr(self.client, "on_hold"):
+            self.client.on_hold(ch["freq"])
+        try:
+            self._hold_loop(ch, priority, now)
+        finally:
+            if hasattr(self.client, "on_resume"):
+                self.client.on_resume()
+
+    def _hold_loop(self, ch, priority, now):
+        thr = self.effective_threshold(ch["freq"])
         last_sig = now
         last_prio = now
         dbg = 0
@@ -597,7 +663,10 @@ class Scanner:
                 logger.debug("HOLD release (%.1fs silence)", now - last_sig)
                 break
             pf = self.get_cfg("priority_freqs")
-            if (not priority and pf
+            # Skip priority peeking while a backend is streaming audio on this
+            # channel (RTL) — retuning away would interrupt the audio. (Phase 3
+            # channelized monitoring will let RTL watch co-window channels free.)
+            if (not priority and pf and not getattr(self.client, "_playing", False)
                     and now - last_prio >= self.get_cfg("priority_interval")):
                 last_prio = now
                 others = sorted(f for f in pf if f != ch["freq"])
@@ -710,6 +779,8 @@ class Scanner:
         """Read GQRX's squelch periodically so a change made in GQRX (or any
         other client) is reflected back into RF HotScan's global-squelch slider.
         Throttled so it never slows the scan."""
+        if hasattr(self.client, "sweep"):
+            return                       # RTL backend: no external GQRX to sync with
         now = time.time()
         if now - self._last_sqlpoll < 0.7 or not self.client.connected:
             return
@@ -810,8 +881,11 @@ class Scanner:
 # GUI
 # --------------------------------------------------------------------------
 class ScannerGUI:
-    def __init__(self, root):
+    def __init__(self, root, container=None):
         self.root = root
+        # Widgets are built into `container` (a tab frame when hosted in the
+        # Notebook); top-level ops (title/geometry/after) stay on `root`.
+        self.container = container if container is not None else root
         self.tags, self.chans = load_bookmarks(BOOKMARKS)
         # Stable unique id per channel so duplicate-frequency bookmarks each get
         # their own tracked row (tree maps must not be keyed by frequency).
@@ -828,6 +902,7 @@ class ScannerGUI:
         self._rf_inited = False       # RF/LNA-gain slider initialised yet?
         self._save_counter = 0        # autosave throttle (refresh ticks)
         self._last_saved = ""         # last-persisted settings snapshot (json)
+        self._backend_kind = "gqrx"   # active backend ("gqrx" | "rtl")
 
         self._load_settings()
         self._build_style()
@@ -863,12 +938,17 @@ class ScannerGUI:
                      borderwidth=0)
         st.map("Treeview", background=[("selected", "#0d3d66")],
                foreground=[("selected", "#ffffff")])
+        st.configure("TNotebook", background=BG, borderwidth=0)
+        st.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
+                     padding=(16, 7), borderwidth=0)
+        st.map("TNotebook.Tab", background=[("selected", PANEL2)],
+               foreground=[("selected", FG)])
 
     # ---- layout ----
     def _build_ui(self):
-        root = self.root
-        root.geometry("1120x740")
-        root.minsize(980, 660)
+        self.root.geometry("1120x740")
+        self.root.minsize(980, 660)
+        root = self.container       # child widgets live in the tab/container
 
         banner = tk.Frame(root, bg=PANEL, height=120)
         banner.pack(fill="x", padx=10, pady=(10, 6))
@@ -917,6 +997,22 @@ class ScannerGUI:
                                                       pady=(12, 2))
 
     def _build_controls(self, p):
+        self._section(p, "BACKEND")
+        self.backend_var = tk.StringVar(value=self._backend_kind)
+        brow = tk.Frame(p, bg=PANEL)
+        brow.pack(fill="x", padx=12)
+        ttk.Radiobutton(brow, text="GQRX (remote)", value="gqrx",
+                        variable=self.backend_var,
+                        command=lambda: self._set_backend("gqrx")).pack(anchor="w")
+        rb_rtl = ttk.Radiobutton(brow, text="RTL-SDR (direct, fast)", value="rtl",
+                                 variable=self.backend_var,
+                                 command=lambda: self._set_backend("rtl"))
+        rb_rtl.pack(anchor="w")
+        if not RTL_AVAILABLE:
+            rb_rtl.configure(state="disabled")
+            tk.Label(p, text="(install RTL deps + run from .venv)", bg=PANEL,
+                     fg=MUTED, font=("Helvetica", 8)).pack(anchor="w", padx=12)
+
         self._section(p, "TRANSPORT")
         row = tk.Frame(p, bg=PANEL)
         row.pack(fill="x", padx=12)
@@ -1084,6 +1180,53 @@ class ScannerGUI:
             self.scanner.run.set()
             self.btn_start.config(text="⏸ Pause")
             logger.info("user: START scan")
+
+    def _set_backend(self, kind):
+        if kind == self._backend_kind:
+            return
+        if kind == "rtl" and not RTL_AVAILABLE:
+            self.backend_var.set(self._backend_kind)
+            return
+        if kind == "rtl" and gqrx_is_running():
+            if messagebox.askyesno(
+                    "Close GQRX?",
+                    "The RTL-SDR backend needs exclusive access to the dongle.\n"
+                    "Quit GQRX now?"):
+                gqrx_quit()
+            else:
+                self.backend_var.set(self._backend_kind)
+                return
+        sc = self.scanner
+        sc.run.clear()
+        self.btn_start.config(text="▶ Scan")
+        if hasattr(self.client, "on_resume"):
+            try:
+                self.client.on_resume()
+            except Exception:
+                pass
+        try:
+            self.client.close()
+        except Exception:
+            pass
+        try:
+            new = rtl_backend.RtlBackend() if kind == "rtl" else GqrxClient()
+        except Exception as e:
+            messagebox.showerror("Backend", f"Could not start {kind} backend:\n{e}")
+            self.backend_var.set(self._backend_kind)
+            return
+        # swap the backend under the engine; reset per-backend state + scale
+        self.client = new
+        sc.client = new
+        sc.orig = None
+        sc._last_mode = sc._last_band = sc._last_sql = None
+        sc.band_floor = {}              # dBFS scale differs between backends
+        self._af_inited = self._rf_inited = False
+        self._backend_kind = kind
+        settle = int(getattr(new, "recommended_settle_ms", 350))
+        sc.set_cfg(settle_ms=settle)
+        self.settle.set(settle)
+        self.scanner.log(f"Backend → {'RTL-SDR (direct)' if kind=='rtl' else 'GQRX'}")
+        self.scanner.request("reconnect")
 
     def _restyle_tag(self, tag, on):
         color = self.tags[tag]
@@ -1546,7 +1689,21 @@ class ScannerGUI:
 
 def main():
     root = tk.Tk()
-    ScannerGUI(root)
+    nb = ttk.Notebook(root)
+    nb.pack(fill="both", expand=True)
+
+    scan_tab = ttk.Frame(nb)
+    nb.add(scan_tab, text="  Scanner  ")
+    ScannerGUI(root, container=scan_tab)        # applies the dark ttk theme
+
+    # Heatmap tab — additive; degrades gracefully if its (lazy) deps are absent.
+    try:
+        import heatmap
+        hm_tab = heatmap.HeatmapTab(nb)
+        nb.add(hm_tab, text="  Heatmap  ")
+    except Exception:
+        logger.error("heatmap tab unavailable:\n%s", traceback.format_exc())
+
     root.mainloop()
 
 

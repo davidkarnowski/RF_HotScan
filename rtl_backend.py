@@ -76,6 +76,28 @@ def plan_windows(freqs, usable=USABLE_BW, dc_guard=DC_GUARD):
     return windows
 
 
+_PWR_TAPS = {}
+
+
+def channel_power_dbfs(iq, fs, offset_hz, bw):
+    """Mean power (dBFS) in a `bw`-wide channel at `offset_hz` from the capture
+    center. ONE measure used everywhere (sweep detection, per-channel level read,
+    and the live hold level) so a squelch threshold means the same thing in all
+    three — otherwise the noise floor / threshold wouldn't transfer between them."""
+    _lazy_imports()
+    key = (int(fs), int(bw))
+    taps = _PWR_TAPS.get(key)
+    if taps is None:
+        taps = signal.firwin(127, max(2000.0, bw / 2.0), fs=fs)
+        _PWR_TAPS[key] = taps
+    n = len(iq)
+    t = np.arange(n) / fs
+    x = iq * np.exp(-2j * np.pi * offset_hz * t)
+    x = signal.lfilter(taps, 1.0, x)[len(taps):]      # drop filter warmup
+    p = float(np.mean(np.abs(x) ** 2)) if x.size else 1e-12
+    return 10.0 * math.log10(p + 1e-12)
+
+
 class FMDemod:
     """Stateful streaming narrow-FM demodulator.
 
@@ -112,6 +134,17 @@ class FMDemod:
         self.phase = 0.0                                        # NCO phase accumulator
         self.last = 0j                                         # last IQ sample (discriminator)
         self.gain = audio_rate / (2 * np.pi * dev_hz)          # normalise deviation -> ~unity
+        self.volume = 1.0                                       # linear audio volume
+        self.last_power_dbfs = -120.0                          # channel power of last block
+
+    def reset(self):
+        self.z1[:] = 0
+        self.z2[:] = 0
+        self.za[:] = 0
+        self.zde[:] = 0
+        self.phase = 0.0
+        self.last = 0j
+        self.last_power_dbfs = -120.0
 
     def process(self, iq):
         n = len(iq)
@@ -126,6 +159,10 @@ class FMDemod:
         # stage 2: channel LPF + decimate
         x, self.z2 = signal.lfilter(self.t2, 1.0, x, zi=self.z2)
         x = x[::self.dec2]
+        # channel power (same scale whether scanning or listening)
+        if x.size:
+            self.last_power_dbfs = 10.0 * math.log10(
+                float(np.mean(np.abs(x) ** 2)) + 1e-12)
         # FM discriminator with carried last sample (continuity at block edge)
         xx = np.empty(len(x) + 1, dtype=np.complex128)
         xx[0] = self.last
@@ -135,7 +172,7 @@ class FMDemod:
         # de-emphasis + audio band-limit (both stateful)
         d, self.zde = signal.lfilter(self.de_b, self.de_a, d, zi=self.zde)
         d, self.za = signal.lfilter(self.ta, 1.0, d, zi=self.za)
-        return np.clip(d * self.gain, -1.0, 1.0).astype(np.float32)
+        return np.clip(d * self.gain * self.volume, -1.0, 1.0).astype(np.float32)
 
 
 class RtlBackend:
@@ -150,6 +187,19 @@ class RtlBackend:
         self.lock = threading.Lock()
         self._audio_stop = threading.Event()
         self._audio_thread = None
+        self._streaming = threading.Event()   # set while the async reader owns the device
+        # --- engine-facing (Backend interface, mirrors GqrxClient) state ---
+        self.recommended_settle_ms = 30     # RTL retunes fast; no GQRX meter lag
+        self.channel_bw = 10000
+        self.strength_nsamp = 32768         # ~14 ms capture for a level read
+        self.volume_db = 0.0
+        self._cur_freq = 462_000_000
+        self._threshold = -50.0
+        self._playing = False
+        self._live_power = -120.0
+        self._audio_live = False            # has the audio stream produced a block?
+        self._hold_t0 = 0.0
+        self._meas = None                   # cached FMDemod for level reads
 
     # ---- device lifecycle ----
     def connect(self):
@@ -210,14 +260,15 @@ class RtlBackend:
         power = float(np.sum(pxx[sel]))
         return 10.0 * math.log10(power + 1e-12)
 
-    def sweep(self, freqs, bw=16000):
+    def sweep(self, freqs, bw=None):
         """Return {freq_hz: power_dbfs} using as few captures as bandwidth allows."""
+        bw = bw or self.channel_bw
         windows = plan_windows(freqs)
         out = {}
         for center, members in windows:
             iq = self._capture(center)
             for ch in members:
-                out[ch] = self._channel_power_dbfs(iq, center, ch, bw)
+                out[ch] = channel_power_dbfs(iq, self.sample_rate, ch - center, bw)
         return out, len(windows)
 
     # ---- Phase 2: gapless FM demod + audio on one parked channel ----
@@ -242,10 +293,16 @@ class RtlBackend:
             import Queue as _queue
 
         center = int(channel_hz) + DC_GUARD * 4      # keep channel off the DC spike
-        with self.lock:
-            self.sdr.center_freq = center
+        try:
+            with self.lock:
+                self.sdr.center_freq = center
+        except Exception as e:                       # dongle glitch -> give up audio
+            self._audio_err = e
+            self._playing = False
+            return
         demod = FMDemod(self.sample_rate, self.AUDIO_RATE,
                         channel_offset=channel_hz - center)
+        demod.volume = 10.0 ** (self.volume_db / 20.0)
         aq = _queue.Queue(maxsize=32)                # ~0.7 s of audio max
         self._audio_stop.clear()
         lead = {"buf": np.zeros(0, dtype=np.float32)}
@@ -258,7 +315,14 @@ class RtlBackend:
                     pass
                 return
             try:
-                aq.put_nowait(demod.process(samples))
+                audio = demod.process(samples)
+                # live level on the SAME scale as sweep/measure (so hold-loss
+                # uses the same threshold as detection)
+                self._live_power = channel_power_dbfs(
+                    samples, self.sample_rate, channel_hz - center,
+                    self.channel_bw)
+                self._audio_live = True
+                aq.put_nowait(audio)
             except _queue.Full:
                 pass                                  # output not draining; skip
 
@@ -276,31 +340,41 @@ class RtlBackend:
                 lead["buf"] = lead["buf"][take:]
                 pos += take
 
-        reader = threading.Thread(
-            target=lambda: self._async_read(iq_cb), daemon=True)
-        reader.start()
-        # prime the ring buffer before opening the output (build latency cushion)
-        t0 = time.time()
-        while aq.qsize() < 6 and time.time() - t0 < 2.0 and not self._audio_stop.is_set():
-            time.sleep(0.01)
-        with sd.OutputStream(samplerate=self.AUDIO_RATE, channels=1,
-                             dtype="float32", blocksize=1024, latency="high",
-                             callback=audio_cb):
-            t1 = time.time()
-            while not self._audio_stop.is_set():
-                if seconds and time.time() - t1 >= seconds:
-                    break
-                time.sleep(0.05)
-        self.stop_audio()
-        reader.join(timeout=1.5)
+        # optional auto-stop after `seconds` (CLI use)
+        if seconds:
+            threading.Timer(seconds, self._request_stop).start()
 
-    def _async_read(self, iq_cb):
-        # read_samples_async runs librtlsdr's continuous reader and calls iq_cb
-        # per block until cancel_read_async(); this is what keeps capture gapless.
+        # The async reader runs in THIS (the audio) thread, so when the thread is
+        # joined the device is guaranteed free again — no separate reader thread
+        # racing the engine's sync level-reads. The output stream's callback
+        # drains the ring buffer independently.
+        self._streaming.set()
+        stream = sd.OutputStream(samplerate=self.AUDIO_RATE, channels=1,
+                                 dtype="float32", blocksize=1024, latency="high",
+                                 callback=audio_cb)
+        stream.start()
         try:
-            self.sdr.read_samples_async(iq_cb, self.IQ_BLOCK)
+            self.sdr.read_samples_async(iq_cb, self.IQ_BLOCK)   # blocks until cancel
         except Exception as e:
             self._audio_err = e
+        finally:
+            self._streaming.clear()
+            try:
+                stream.stop(); stream.close()
+            except Exception:
+                pass
+            self._playing = False
+
+    def _request_stop(self):
+        self._audio_stop.set()
+        # only cancel when a stream is actually active — calling cancel_read_async
+        # on an idle dongle corrupts its state and breaks the next center_freq.
+        if self._streaming.is_set():
+            try:
+                if self.sdr is not None:
+                    self.sdr.cancel_read_async()
+            except Exception:
+                pass
 
     def play_async(self, channel_hz, **kw):
         self.stop_audio()
@@ -310,16 +384,96 @@ class RtlBackend:
         self._audio_thread.start()
 
     def stop_audio(self):
-        self._audio_stop.set()
-        try:
-            if self.sdr is not None:
-                self.sdr.cancel_read_async()
-        except Exception:
-            pass
+        self._request_stop()
         if self._audio_thread and self._audio_thread.is_alive() \
                 and threading.current_thread() is not self._audio_thread:
-            self._audio_thread.join(timeout=1.5)
+            self._audio_thread.join(timeout=2.0)
             self._audio_thread = None
+        # make sure the device is no longer owned by an async reader before any
+        # subsequent synchronous level-read
+        t0 = time.time()
+        while self._streaming.is_set() and time.time() - t0 < 1.0:
+            time.sleep(0.01)
+
+    # ---- Backend interface (mirrors GqrxClient so Scanner drives either) ----
+    # Single-channel path: the engine tunes a channel and reads its level. On the
+    # RTL this is a short capture -> channel power (no GQRX meter lag). While
+    # parked (on_hold), level comes from the live audio demod so we don't fight
+    # the dongle with a second capture.
+    def set_mode(self, mode, bw):
+        self.channel_bw = int(bw) or self.channel_bw
+
+    def get_mode(self):
+        return "FM", str(self.channel_bw)
+
+    def set_freq(self, hz):
+        self._cur_freq = int(hz)
+
+    def get_freq(self):
+        return int(self._cur_freq)
+
+    def _measure_channel(self, freq):
+        # never do a synchronous read while the async audio reader owns the device
+        t0 = time.time()
+        while self._streaming.is_set() and time.time() - t0 < 1.0:
+            time.sleep(0.01)
+        center = int(freq) + DC_GUARD * 4          # dodge the DC spike
+        with self.lock:
+            if self.sdr is None or self._streaming.is_set():
+                return self._live_power
+            self.sdr.center_freq = center
+            iq = self.sdr.read_samples(self.strength_nsamp)
+        return channel_power_dbfs(iq, self.sample_rate, freq - center,
+                                  self.channel_bw)
+
+    def strength(self):
+        if self._playing:
+            alive = (self._audio_thread is not None
+                     and self._audio_thread.is_alive())
+            # use the live stream level; tolerate ~1 s of priming before giving up
+            if alive and (self._audio_live or time.time() - self._hold_t0 < 1.0):
+                return self._live_power
+            self._playing = False             # audio failed/ended -> fall back
+        if not self.connected:
+            return -120.0
+        return self._measure_channel(self._cur_freq)
+
+    def get_sql(self):
+        return self._threshold
+
+    def set_sql(self, dbfs):
+        self._threshold = float(dbfs)         # software squelch (engine compares)
+
+    def get_af(self):
+        return self.volume_db
+
+    def set_af(self, db):
+        self.volume_db = float(db)
+
+    def get_lna(self):
+        return float(self.gain)
+
+    def set_lna(self, db):
+        self.gain = float(db)
+        with self.lock:
+            if self.sdr is not None:
+                try:
+                    self.sdr.gain = self.gain     # real tuner gain
+                except Exception:
+                    pass
+
+    # audio hooks the Scanner calls (GqrxClient has neither; GQRX makes its own
+    # sound). These let the engine drive RTL audio on park/resume.
+    def on_hold(self, freq):
+        self._audio_live = False
+        self._hold_t0 = time.time()
+        self._live_power = self._threshold     # seed so first hold read isn't stale
+        self._playing = True
+        self.play_async(int(freq))
+
+    def on_resume(self):
+        self._playing = False
+        self.stop_audio()
 
 
 # --------------------------------------------------------------------------
