@@ -10,6 +10,7 @@ USCG                ; #ffd700
 LBT                 ; #ff69b4
 LBMH                ; #8b4513
 HAM                 ; #9acd32
+GMRS/FRS            ; #00e5ff
 
 # Frequency ; Name                     ; Modulation          ;  Bandwidth; Tags
    145180000; W6MPH Pasadena [PL 156.7 -0.6]                  ; Narrow FM           ;      16000; HAM
@@ -115,6 +116,21 @@ HAM                 ; #9acd32
    462137500; LBUSD Middle School Ops                         ; Narrow FM           ;      10000; LBUSD
    462175000; LBUSD Polytechnic High School                   ; Narrow FM           ;      10000; LBUSD
    462187500; LBCC 4 [D223]                                   ; Narrow FM           ;      10000; LBCC
+   462550000; FRS/GMRS Ch 15 (462.5500)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462562500; FRS/GMRS Ch 1 (462.5625)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462575000; FRS/GMRS Ch 16 (462.5750)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462587500; FRS/GMRS Ch 2 (462.5875)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462600000; FRS/GMRS Ch 17 (462.6000)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462612500; FRS/GMRS Ch 3 (462.6125)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462625000; FRS/GMRS Ch 18 (462.6250)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462637500; FRS/GMRS Ch 4 (462.6375)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462650000; FRS/GMRS Ch 19 (462.6500)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462662500; FRS/GMRS Ch 5 (462.6625)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462675000; FRS/GMRS Ch 20 (462.6750)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462687500; FRS/GMRS Ch 6 (462.6875)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462700000; FRS/GMRS Ch 21 (462.7000)                       ; Narrow FM           ;      16000; GMRS/FRS
+   462712500; FRS/GMRS Ch 7 (462.7125)                        ; Narrow FM           ;      16000; GMRS/FRS
+   462725000; FRS/GMRS Ch 22 (462.7250)                       ; Narrow FM           ;      16000; GMRS/FRS
    463000000; LB Memorial MEDIC 1-F [PL 162.2]                ; Narrow FM           ;      10000; LBMH
    463025000; LB Memorial MEDIC 2-D [PL 151.4]                ; Narrow FM           ;      10000; LBMH
    463100000; LB Memorial MEDIC 5-D [PL 151.4]                ; Narrow FM           ;      10000; LBMH
@@ -127,6 +143,21 @@ HAM                 ; #9acd32
    464775000; CSULB Operations 1 [D503]                       ; Narrow FM           ;      10000; CSULB
    464925000; CSULB PD 2 [D503]                               ; Narrow FM           ;      10000; CSULB
    467137500; LBUSD Middle School Ops                         ; Narrow FM           ;      10000; LBUSD
+   467550000; GMRS Ch 15R Repeater Input (467.5500)           ; Narrow FM           ;      16000; GMRS/FRS
+   467562500; FRS Ch 8 (467.5625) FRS-only 0.5W               ; Narrow FM           ;      12500; GMRS/FRS
+   467575000; GMRS Ch 16R Repeater Input (467.5750)           ; Narrow FM           ;      16000; GMRS/FRS
+   467587500; FRS Ch 9 (467.5875) FRS-only 0.5W               ; Narrow FM           ;      12500; GMRS/FRS
+   467600000; GMRS Ch 17R Repeater Input (467.6000)           ; Narrow FM           ;      16000; GMRS/FRS
+   467612500; FRS Ch 10 (467.6125) FRS-only 0.5W              ; Narrow FM           ;      12500; GMRS/FRS
+   467625000; GMRS Ch 18R Repeater Input (467.6250)           ; Narrow FM           ;      16000; GMRS/FRS
+   467637500; FRS Ch 11 (467.6375) FRS-only 0.5W              ; Narrow FM           ;      12500; GMRS/FRS
+   467650000; GMRS Ch 19R Repeater Input (467.6500)           ; Narrow FM           ;      16000; GMRS/FRS
+   467662500; FRS Ch 12 (467.6625) FRS-only 0.5W              ; Narrow FM           ;      12500; GMRS/FRS
+   467675000; GMRS Ch 20R Repeater Input (467.6750)           ; Narrow FM           ;      16000; GMRS/FRS
+   467687500; FRS Ch 13 (467.6875) FRS-only 0.5W              ; Narrow FM           ;      12500; GMRS/FRS
+   467700000; GMRS Ch 21R Repeater Input (467.7000)           ; Narrow FM           ;      16000; GMRS/FRS
+   467712500; FRS Ch 14 (467.7125) FRS-only 0.5W              ; Narrow FM           ;      12500; GMRS/FRS
+   467725000; GMRS Ch 22R Repeater Input (467.7250)           ; Narrow FM           ;      16000; GMRS/FRS
    469837500; CSULB Operations 3                              ; Narrow FM           ;      10000; CSULB
    469962500; CSULB Operations 4                              ; Narrow FM           ;      10000; CSULB
    470712500; CSULB PD 1 Dispatch [PL 203.5]                  ; Narrow FM           ;      10000; CSULB

@@ -197,8 +197,8 @@ landscape. Rather than a handful of random frequencies, it is organized to cover
 ham bands), so you can drop it in and immediately scan — or heatmap — what a whole
 city is saying on the air.
 
-- **123 channels across 11 tags** — 10 public-safety / civic agencies plus
-  amateur radio — spanning VHF/UHF (≈145–935 MHz):
+- **153 channels across 12 tags** — 10 public-safety / civic agencies plus
+  amateur radio and GMRS/FRS — spanning VHF/UHF (≈145–935 MHz):
 
   | Tag | Service | Tag | Service |
   | --- | --- | --- | --- |
@@ -207,13 +207,17 @@ city is saying on the air.
   | `LBC` | City gov / utilities / works | `LBT` | Transit |
   | `LBUSD` | Unified School District | `CSULB` | Cal State Long Beach |
   | `LBCC` | City College | `LBMH` | Memorial paramedic base-hospital |
-  | `HAM` | Amateur radio (2 m / 1.25 m / 70 cm) | | |
+  | `HAM` | Amateur radio (2 m / 1.25 m / 70 cm) | `GMRS/FRS` | GMRS + FRS (462/467 MHz) |
 
 - **Tag-per-service, color-coded**, so you can filter the scan (or read the
-  heatmap) by service — watch just police + fire, just ham, or everything at once.
+  heatmap) by service — watch just police + fire, just ham, GMRS/FRS, or
+  everything at once.
 - **Amateur radio (`HAM`)** — area 2 m / 1.25 m / 70 cm repeaters plus the
   national **FM simplex calling** channels and the full 15 kHz **2 m simplex
   grid** (146.520 national calling, 146.535, 146.550, … through 147.570).
+- **GMRS/FRS (`GMRS/FRS`)** — all 30 channels of the combined family-radio plan
+  with their **channel numbers**: FRS/GMRS channels 1–22 (462/467 MHz), the
+  FRS-only 0.5 W channels 8–14, and the eight GMRS repeater inputs 15R–22R.
 - **Tones carried in channel names** (`[D031]`, `[PL 151.4]`, repeater shifts like
   `[-0.6]`) as a reference, and **analog FM only** (digital P25/DMR/NXDN are noted
   but not demodulable).
@@ -277,12 +281,17 @@ followed a few deliberate conventions:
   | `LBT` | Long Beach Transit |
   | `LBMH` | Long Beach Memorial paramedic base-hospital channels |
   | `HAM` | Amateur radio — area 2 m / 1.25 m / 70 cm repeaters + FM simplex |
+  | `GMRS/FRS` | GMRS + FRS combined — all 30 channels with channel numbers |
 
 - **Amateur radio (`HAM`).** Area repeaters carry their callsign and shift/tone
   in the name (e.g. `K6CHE Long Beach [PL 156.7 +0.6]`); the FM simplex calling
   channels and the full 15 kHz 2 m simplex grid (146.520 national calling →
   147.570) are included per the ARRL band plan. Repeater **outputs** are listed
   (what you hear); the `[±0.6]` / `[-5]` shift is reference only.
+- **GMRS/FRS (`GMRS/FRS`).** The full 30-channel FCC family-radio plan, each
+  channel named with its number (e.g. `FRS/GMRS Ch 1 (462.5625)`, `GMRS Ch 15R
+  Repeater Input (467.5500)`). FRS-only channels 8–14 are tagged as such; the
+  eight 467 MHz repeater inputs (15R–22R) pair with outputs 15–22 at +5 MHz.
 - **CTCSS/DPL tones embedded in the channel name** (e.g. `[D031]` = DPL 031,
   `[PL 151.4]` = 151.4 Hz CTCSS). GQRX bookmarks have no tone field, and the
   remote protocol can't gate on tone, so the tone is carried in the name as a
