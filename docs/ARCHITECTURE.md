@@ -1,8 +1,12 @@
 # RF HotScan — Architecture
 
-RF HotScan is a single Python file (`rf_hotscan.py`, standard library only)
-organized into four layers. This document explains each layer, the threading
-model, and the key algorithms, so a human or an AI agent can extend it safely.
+RF HotScan's GQRX scanner core is a single Python file (`rf_hotscan.py`, standard
+library only) organized into four layers, described first. Optional modules add
+the direct RTL-SDR backend (`rtl_backend.py`), transmission recording
+(`recorder.py`), a shared clock (`clock.py`), and the RF-activity heatmap
+(`heatmap.py`, §5 — a second GUI tab). This document explains each layer, the
+threading model, and the key algorithms, so a human or an AI agent can extend it
+safely.
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
@@ -190,7 +194,47 @@ selector swaps it live.
 The engine and GUI are otherwise backend-agnostic (~70% reuse as the spike
 predicted). See `docs/AGENTS.md` → *Backends & RTL-SDR* for the shared-dongle
 invariant (GQRX / RtlBackend / heatmap are mutually exclusive owners) and the
-`cancel_read_async`-on-idle pitfall.
+`cancel_read_async`-on-idle pitfall. Single ownership is **enforced**: a
+process-wide owner in `rtl_backend.py` raises `DongleBusy` if a second owner
+opens the dongle.
+
+---
+
+## 5. Heatmap (`heatmap.py`) — a second tab
+
+A `ttk.Notebook` hosts two tabs: **Scanner** (everything above) and **Heatmap**.
+The heatmap is a separate, frequency-range (not bookmark) feature: it sweeps a
+start→stop band over a time window into a time × frequency activity heatmap.
+
+```
+HeatmapTab (Tkinter)  ──▶ HeatmapRecorder (engine thread) ──▶ SweepSource
+  live waterfall          owns the sweep loop + HeatmapDB      ├─ FakeSweepSource (synthetic IQ)
+  + detected-activity      (mirrors Scanner's threading)        └─ RtlSweepSource → RtlBackend.capture_iq
+```
+
+- **Sweep DSP:** `SweepConfig` derives FFT geometry and tiles the range into
+  ~2 MHz windows (`plan_range_windows`); each window's IQ → Welch PSD
+  (`window_power_dbfs`) → crop edges, null the DC bin, scatter onto a global bin
+  grid → one dBFS row per sweep.
+- **Persistence (`HeatmapDB`, `heatmap.sqlite`, WAL):** one quantised uint8 power
+  row per sweep (`ref`/`scale`/`t_unix`/`t_dur_ms`); `sessions` / `power` /
+  `activity` / `iq_dumps`. `load_matrix()` rebuilds the exact heatmap offline.
+- **Activity:** per-bin min-hold-with-leak floor → `row > floor+margin` mask →
+  contiguous active bins clustered into detected ranges (duty %).
+- **Rendering:** live pure-Tk `HeatmapView` (PhotoImage waterfall, custom
+  colormaps, auto-range — no matplotlib); offline `render_session_png` uses
+  matplotlib (lazy import) for re-render / PNG export.
+- **Shared dongle:** `SdrShareCoordinator` lends the Scanner's connected
+  `RtlBackend` to the heatmap (borrow mode) and pauses/resumes the Scanner around
+  each capture — keyed to capture execution, not tab focus. Borrow never closes
+  the borrowed backend; FFT geometry auto-syncs to its sample rate.
+- **Headless:** the engine is GUI-free — `python -m heatmap scan|render|list|info`
+  (JSON for agents) and `run_scan(...)`. Tested via `test_heatmap.py` on the
+  `FakeSweepSource` (no dongle).
+
+Heavy deps (numpy/scipy/matplotlib/pyrtlsdr) are lazily imported, so importing
+`heatmap` — and launching the app — stays cheap and the GQRX path stays
+stdlib-only.
 
 ---
 

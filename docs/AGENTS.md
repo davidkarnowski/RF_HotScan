@@ -123,13 +123,25 @@ The RTL dongle is a **single-owner USB device.** GQRX, `RtlBackend`, and the
 **heatmap** (`heatmap.py`, `RtlSweepSource` / `RtlBackend.capture_iq`) can NOT
 own it at the same time. Rules:
 - Only one of {GQRX running, RtlBackend connected, heatmap sweeping} may hold the
-  dongle at once. Switching to RTL offers to quit GQRX (`gqrx_quit()`); a heatmap
-  range-sweep and a scanner RTL sweep must not run concurrently on the same
-  device — coordinate via a single owner.
+  dongle at once. Switching to RTL offers to quit GQRX (`gqrx_quit()`).
+- **This is now ENFORCED** by a process-wide owner in `rtl_backend.py`:
+  `connect()` calls `_acquire_dongle(self, owner_label)` and `close()` releases;
+  a second owner opening the dongle raises `DongleBusy` (clear message) instead
+  of a corrupted next tune. `dongle_owner()` returns the current owner label.
+  Re-acquire by the *same* instance is allowed (idempotent reconnect).
+- **Borrow + auto-pause (in-app coordination).** When both tabs live in one
+  process, a Heatmap capture does NOT open a second dongle: `SdrShareCoordinator`
+  (in `rf_hotscan.py`) lends the Scanner's already-connected `RtlBackend` to the
+  heatmap and pauses the Scanner's scan + audio (`run.clear()` + `on_resume()`)
+  for the duration of the capture, then resumes it. `RtlSweepSource(cfg,
+  backend=…)` runs in *borrow mode* (never closes the borrowed backend). Pause/
+  resume is keyed to **capture execution, not tab focus**. If the Scanner is on
+  GQRX (coordinator returns `None`), the heatmap opens its own dongle.
 - **Never call `cancel_read_async()` on an idle dongle** — it corrupts the next
   `center_freq` (LIBUSB_ERROR_IO). Guard with the `_streaming` flag.
 - Do all device access through the owner's lock; never do a synchronous
-  `read_samples` while an async reader is active.
+  `read_samples` while an async reader is active (the borrow path stops the
+  Scanner's audio first, so `capture_iq` is the only reader).
 
 ### dBFS scale convention
 `rtl_backend.channel_power_dbfs(iq, fs, offset_hz, bw)` is the ONE level measure
@@ -161,6 +173,35 @@ and adds `iso` to `emit_event`; keep that convention.
   Sample-accurate stop time = `start + n_frames/48000`. A future playback panel
   reads `RecordingsDB.list()/get()` and plays `wav_path`.
 - GQRX backend has no audio samples → no `on_hold`, no recording (control hidden).
+
+### Heatmap (`heatmap.py`)
+A second app tab and a standalone module. It sweeps a contiguous start→stop range
+over time into a time × frequency **activity** heatmap (the 2026 `rtl_power` +
+`heatmap.py`). Independent of the bookmark/channel model.
+- **Pipeline:** `SweepConfig` (range/FFT geometry) → a `SweepSource`
+  (`FakeSweepSource` synthetic, or `RtlSweepSource` over `RtlBackend.capture_iq`)
+  → per-window Welch FFT → crop/DC-null/stitch → one dBFS row per sweep.
+  `HeatmapRecorder` is the engine thread (same shape as `Scanner`: lock-guarded
+  `ui`, `rowq`/`logq`/`actions` queues, broad-except never-die loop).
+- **Persistence:** `HeatmapDB` (`heatmap.sqlite`, WAL) stores one **quantised
+  uint8 power row per sweep** (+ per-sweep `ref/scale`, `t_unix`, `t_dur_ms`);
+  `load_matrix()` reconstructs the exact heatmap. `sessions` / `power` /
+  `activity` / `iq_dumps` tables.
+- **Detection:** per-bin min-hold-with-leak floor; `row > floor + margin` →
+  active; contiguous active bins cluster into detected ranges (duty %).
+- **Rendering:** live pure-Tk `HeatmapView` waterfall (no matplotlib needed);
+  offline `render_session_png` / `_draw_heatmap_fig` use matplotlib (lazy).
+- **Scale caveat:** `window_power_dbfs` is a per-FFT-bin PSD — a DIFFERENT scale
+  from `channel_power_dbfs`. Don't transfer a scanner squelch threshold to it;
+  the heatmap only compares to its own floor/auto-range.
+- **Headless / agent:** `python -m heatmap scan|render|list|info` (machine JSON
+  on stdout via `--json`; `--device fake` for no hardware) and `run_scan(...)`.
+  Errors (e.g. `DongleBusy`) come back as structured JSON, not tracebacks.
+- **Verify headless (no dongle):** `.venv/bin/python test_heatmap.py` — unit
+  (tiling/quantise), DB round-trip + activity, dongle-coordination, borrow
+  (mock backend), and a GUI smoke. All pass on the `FakeSweepSource`.
+- **Shared dongle:** see the *Shared-dongle invariant* above (borrow + auto-pause,
+  enforced single owner). Heatmap timestamps use `clock.py`.
 
 ## Things that are intentionally NOT done (GQRX backend)
 

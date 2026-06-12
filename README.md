@@ -42,6 +42,11 @@ third-party dependencies** (standard library only).
   indicator dot (green = reachable, red = not).
 - **Verbose, tailable log** at `./scanner.log` for debugging and
   for AI agents to inspect scan behavior.
+- **RF activity heatmap** (second tab) — captures a time × frequency heatmap over
+  a band using **direct RTL-SDR control**, stores every sweep in SQLite
+  (re-renderable), flags active frequencies, and exports PNGs. Also drivable
+  headless via `python -m heatmap` for scripts/agents. See
+  [Heatmap](#heatmap-rf-activity-over-time).
 
 ---
 
@@ -73,6 +78,57 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
 
 ---
 
+## Heatmap (RF activity over time)
+
+A second tab, **Heatmap**, is the 2026 take on the classic `rtl_power` +
+`heatmap.py`: it sweeps a start→stop frequency range over a time window using
+**direct RTL-SDR control** and answers *what was transmitting, where, and when*
+across the band. (Implemented in `heatmap.py`, built on the direct
+`rtl_backend.RtlBackend`.)
+
+- **Direct dongle sweep** — tiles the range into ~2 MHz windows, FFTs each, and
+  stitches one full per-bin power row per sweep. Lots of knobs: start/stop,
+  sample rate, FFT bin width, gain/AGC, PPM, dwell, averaged blocks, crop %, hop
+  overlap, duration, activity margin, colormap.
+- **Every sweep persisted to SQLite** (`heatmap.sqlite`, one quantised power row
+  per sweep) so a heatmap can be **re-created offline, exactly** — re-render or
+  export a PNG from any past session.
+- **Activity detection** — a per-bin noise floor flags bins that key up, and
+  contiguous active bins are clustered into detected frequency ranges (with duty
+  %), so intermittent transmissions stand out from a constant floor.
+- **Live + polished views** — a fast pure-Tk waterfall during capture; a
+  matplotlib re-render (colormaps, colorbar, MHz/time axes, pan/zoom, PNG export)
+  for stored sessions.
+- **Opt-in raw IQ dumps** (`.cf32`) per window — manual or auto-on-activity.
+
+### Shared dongle
+
+The RTL dongle is single-owner. The Scanner (in RTL mode) and the Heatmap cannot
+hold it at once, so running a Heatmap capture **borrows the Scanner's connected
+backend and pauses the Scanner's scan for the duration of the capture**, then
+resumes it — tied to *running a capture*, not to switching tabs. If the Scanner
+is on the GQRX backend (or no dongle is connected), the Heatmap opens its own
+(quitting GQRX first). A second owner trying to open the dongle gets a clear
+error rather than a corrupted tune.
+
+### Headless / agent use
+
+The same engine runs without the GUI, for scripts or AI agents:
+
+```sh
+# capture 88–108 MHz for 10 s; print JSON (session id, detected ranges, ...)
+.venv/bin/python -m heatmap scan --start 88e6 --stop 108e6 --duration 10 \
+    --device 0 --gain auto --json
+.venv/bin/python -m heatmap render <session_id> --png out.png   # re-render a session
+.venv/bin/python -m heatmap list                                 # sessions as JSON
+.venv/bin/python -m heatmap info <session_id>                     # params + detected
+```
+
+Use `--device fake` for a synthetic, no-hardware dry run that exercises the whole
+pipeline. `heatmap.run_scan(...)` is the equivalent Python API.
+
+---
+
 ## Requirements
 
 - **GQRX 2.15+** (developed against 2.17.7) with a working SDR device.
@@ -81,7 +137,12 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
     version). Apple's `/usr/bin/python3` already ships Tkinter but with an older
     Tk that renders poorly on Retina displays.
   - Debian/Ubuntu: `sudo apt install python3-tk`.
-- No `pip` packages required.
+- No `pip` packages required for the GQRX scanner path.
+- **For the direct RTL-SDR backend and the Heatmap tab** (optional): `librtlsdr`
+  (`brew install rtl-sdr`) plus `numpy`, `scipy`, `pyrtlsdr`, `sounddevice`,
+  `matplotlib` in a project `.venv` — see
+  [`requirements-rtl.txt`](requirements-rtl.txt) or run `./setup_rtl_env.sh`.
+  Then launch with the venv interpreter (`.venv/bin/python rf_hotscan.py`).
 
 ---
 
@@ -98,8 +159,13 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
    [`examples/long_beach_bookmarks.csv`](examples/long_beach_bookmarks.csv).
 4. **Run it:**
    ```sh
-   python3 rf_hotscan.py
+   python3 rf_hotscan.py            # GQRX scanner path (stdlib only)
+   .venv/bin/python rf_hotscan.py   # + direct RTL-SDR backend & Heatmap tab
    ```
+   The window has two tabs: **Scanner** (GQRX / RTL bookmark scanner) and
+   **Heatmap** (RF activity heatmap — see [above](#heatmap-rf-activity-over-time)).
+   Run from the repo directory so it finds `heatmap.py` / `rtl_backend.py` /
+   `clock.py`.
 
 ### First-run workflow
 
@@ -188,6 +254,9 @@ name, and let RF HotScan handle the rest.
 | `./scanner.log` | Verbose, appendable activity log next to the app. `tail -f` it. |
 | `./scanner_settings.json` | Persisted UI settings (tags, lockouts, disabled channels, sliders). |
 | `./recordings/` | Transmission WAVs + `recordings.sqlite` + `recordings.events.jsonl`. |
+| `./heatmap.sqlite` | Heatmap sessions + per-sweep power rows (re-renderable). |
+| `./heatmap.log` / `./heatmap.events.jsonl` | Heatmap verbose log + agent-readable JSONL event stream. |
+| `./iq/` | Opt-in raw IQ dumps (`.cf32`) from heatmap captures. |
 
 ---
 
