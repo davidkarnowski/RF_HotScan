@@ -133,9 +133,12 @@ class FMDemod:
         self.zde = np.zeros(1)
         self.phase = 0.0                                        # NCO phase accumulator
         self.last = 0j                                         # last IQ sample (discriminator)
-        self.gain = audio_rate / (2 * np.pi * dev_hz)          # normalise deviation -> ~unity
-        self.volume = 1.0                                       # linear audio volume
+        self.volume = 1.0                                       # linear user volume trim
         self.last_power_dbfs = -120.0                          # channel power of last block
+        # audio AGC (normalizes loudness regardless of FM deviation, like GQRX)
+        self.agc_target = 0.30      # target RMS the AGC drives the audio toward
+        self.agc_max = 80.0         # max makeup gain (caps noise boost in silence)
+        self._agc = 1.0             # current AGC gain (smoothed across blocks)
 
     def reset(self):
         self.z1[:] = 0
@@ -145,6 +148,7 @@ class FMDemod:
         self.phase = 0.0
         self.last = 0j
         self.last_power_dbfs = -120.0
+        self._agc = 1.0
 
     def process(self, iq):
         n = len(iq)
@@ -172,7 +176,16 @@ class FMDemod:
         # de-emphasis + audio band-limit (both stateful)
         d, self.zde = signal.lfilter(self.de_b, self.de_a, d, zi=self.zde)
         d, self.za = signal.lfilter(self.ta, 1.0, d, zi=self.za)
-        return np.clip(d * self.gain * self.volume, -1.0, 1.0).astype(np.float32)
+        # --- audio AGC: drive RMS toward a target so loudness is consistent
+        # regardless of how hard the signal is deviating (this is what GQRX does
+        # and why it sounded fuller). Fast attack, slow release.
+        rms = float(np.sqrt(np.mean(d * d))) + 1e-9
+        want = min(self.agc_max, self.agc_target / rms)
+        coef = 0.5 if want < self._agc else 0.05      # attack vs release
+        self._agc += coef * (want - self._agc)
+        # tanh soft-limiter instead of a hard clip, so raising volume saturates
+        # smoothly rather than blowing out.
+        return np.tanh(d * self._agc * self.volume).astype(np.float32)
 
 
 class RtlBackend:
