@@ -981,9 +981,30 @@ class ScannerGUI:
 
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True, padx=10, pady=8)
-        ctrl = tk.Frame(body, bg=PANEL, width=300)
-        ctrl.pack(side="left", fill="y")
-        ctrl.pack_propagate(False)
+        # Left control panel is scrollable (it's taller than short screens).
+        ctrl_outer = tk.Frame(body, bg=PANEL, width=300)
+        ctrl_outer.pack(side="left", fill="y")
+        ctrl_outer.pack_propagate(False)
+        ctrl_canvas = tk.Canvas(ctrl_outer, bg=PANEL, highlightthickness=0,
+                                width=300)
+        vsb = ttk.Scrollbar(ctrl_outer, orient="vertical",
+                            command=ctrl_canvas.yview)
+        ctrl_canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        ctrl_canvas.pack(side="left", fill="both", expand=True)
+        ctrl = tk.Frame(ctrl_canvas, bg=PANEL)
+        ctrl_canvas.create_window((0, 0), window=ctrl, anchor="nw", width=284)
+        ctrl.bind("<Configure>",
+                  lambda e: ctrl_canvas.configure(
+                      scrollregion=ctrl_canvas.bbox("all")))
+
+        def _wheel(e):
+            ctrl_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        # only capture the wheel while the pointer is over the control panel
+        ctrl_canvas.bind("<Enter>",
+                         lambda e: ctrl_canvas.bind_all("<MouseWheel>", _wheel))
+        ctrl_canvas.bind("<Leave>",
+                         lambda e: ctrl_canvas.unbind_all("<MouseWheel>"))
         self._build_controls(ctrl)
         rightcol = tk.Frame(body, bg=BG)
         rightcol.pack(side="left", fill="both", expand=True, padx=(8, 0))
@@ -1620,6 +1641,9 @@ class ScannerGUI:
                   "hold_s", "priority_interval"):
             if k in d:
                 c[k] = d[k]
+        # clamp global squelch to the slider's range so a bad/stale value (e.g.
+        # a test that set +20 dBFS) can't silently block all holds
+        c["global_sql"] = max(-100.0, min(-10.0, float(c["global_sql"])))
         if d.get("enabled_tags"):
             c["enabled_tags"] = set(d["enabled_tags"]) & set(self.tags)
         c["lockout"] = set(d.get("lockout", []))
