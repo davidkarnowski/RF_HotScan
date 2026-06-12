@@ -16,10 +16,10 @@ Features
   - Live dBFS signal meter with the active threshold marked
   - Auto-noise-floor: sample empty in-band frequencies and set per-band squelch
   - Read-back verification of every GQRX command, written to a verbose log that
-    can be tailed:  ~/.config/gqrx/scanner.log
+    can be tailed:  ./scanner.log (next to the app)
 
 Run:  /opt/homebrew/bin/python3 rf_hotscan.py
-Tail: tail -f ~/.config/gqrx/scanner.log
+Tail: tail -f ./scanner.log (next to the app)
 """
 
 import os
@@ -45,9 +45,16 @@ except Exception:
     rtl_backend = None
     RTL_AVAILABLE = False
 
+# The app keeps its own runtime files (log, settings, recordings) next to itself,
+# not in ~/.config/gqrx — direct SDR is the primary path. Only the bookmark file
+# stays shared with GQRX (the GQRX backend tunes the same channels); it falls
+# back to an app-local bookmarks.csv when GQRX isn't installed.
+APPDIR = os.path.dirname(os.path.abspath(__file__))
 BOOKMARKS = os.path.expanduser("~/.config/gqrx/bookmarks.csv")
-SETTINGS = os.path.expanduser("~/.config/gqrx/scanner_settings.json")
-LOGFILE = os.path.expanduser("~/.config/gqrx/scanner.log")
+if not os.path.exists(BOOKMARKS):
+    BOOKMARKS = os.path.join(APPDIR, "bookmarks.csv")
+SETTINGS = os.path.join(APPDIR, "scanner_settings.json")
+LOGFILE = os.path.join(APPDIR, "scanner.log")
 HOST, PORT = "127.0.0.1", 7356
 
 # Dark palette
@@ -1250,7 +1257,7 @@ class ScannerGUI:
             self.iid_cid[iid] = c["cid"]
 
     def _build_log(self, parent):
-        tk.Label(parent, text="LOG  (full detail: ~/.config/gqrx/scanner.log)",
+        tk.Label(parent, text="LOG  (full detail: ./scanner.log)",
                  bg=BG, fg=MUTED, font=("Helvetica", 10, "bold")).pack(
                      anchor="w", pady=(8, 0))
         self.log = tk.Text(parent, height=7, bg=PANEL2, fg=FG, bd=0,

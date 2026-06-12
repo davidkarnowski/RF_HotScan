@@ -40,7 +40,7 @@ third-party dependencies** (standard library only).
 - **Live dBFS meter** with the active threshold marked, color-coded state
   (`SCANNING` / `HOLDING` / `CALIBRATING` / `DISCONNECTED`), and a connection
   indicator dot (green = reachable, red = not).
-- **Verbose, tailable log** at `~/.config/gqrx/scanner.log` for debugging and
+- **Verbose, tailable log** at `./scanner.log` for debugging and
   for AI agents to inspect scan behavior.
 
 ---
@@ -184,9 +184,10 @@ name, and let RF HotScan handle the rest.
 
 | Path | Purpose |
 | --- | --- |
-| `~/.config/gqrx/bookmarks.csv` | GQRX's bookmark file — the scan source (read-only to RF HotScan). |
-| `~/.config/gqrx/scanner.log` | Verbose, appendable activity log. `tail -f` it. |
-| `~/.config/gqrx/scanner_settings.json` | Persisted UI settings (tags, lockouts, disabled channels, sliders). |
+| `~/.config/gqrx/bookmarks.csv` | GQRX's bookmark file — the scan source (read-only; falls back to `./bookmarks.csv` if absent). |
+| `./scanner.log` | Verbose, appendable activity log next to the app. `tail -f` it. |
+| `./scanner_settings.json` | Persisted UI settings (tags, lockouts, disabled channels, sliders). |
+| `./recordings/` | Transmission WAVs + `recordings.sqlite` + `recordings.events.jsonl`. |
 
 ---
 

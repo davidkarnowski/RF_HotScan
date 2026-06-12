@@ -13,13 +13,13 @@ is no build step and no package install.
 ## Ground truth: read these signals, don't guess
 
 - **The verbose log** is your primary observability tool:
-  `~/.config/gqrx/scanner.log`. It records every frequency hop
+  `./scanner.log` (next to the app). It records every frequency hop
   (`HOP #n freq tag s=<dBFS> thr=<dBFS> ** ACTIVE **`), state transitions
   (`STATE x -> y`), holds, action processing, squelch read-backs (`VERIFY`,
   `Squelch set ... read-back ... OK/MISMATCH`), and full tracebacks on error.
   Tail it while reproducing:
   ```sh
-  tail -f ~/.config/gqrx/scanner.log
+  tail -f scanner.log    # in the app dir
   ```
   A robust pattern for headless observation: record the current line count,
   run/repro, then read only the new lines.
