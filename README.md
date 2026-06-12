@@ -187,6 +187,42 @@ RF HotScan does not maintain its own channel database — it reads **GQRX's
 bookmark file** (`~/.config/gqrx/bookmarks.csv`) directly, so anything you can
 bookmark in GQRX, the scanner can sweep.
 
+### Bundled sample: a whole-city monitoring set
+
+The repo ships a ready-to-use example at
+[`examples/long_beach_bookmarks.csv`](examples/long_beach_bookmarks.csv) — a
+**city-monitoring set** for Long Beach, CA. Rather than a handful of random
+frequencies, it is organized to cover *one city's* conventional analog radio
+landscape across its public agencies, so you can drop it in and immediately
+scan — or heatmap — what a whole city is saying on the air.
+
+- **79 channels across 10 agency tags**, spanning VHF/UHF (≈150–935 MHz):
+
+  | Tag | Agency / service | Tag | Agency / service |
+  | --- | --- | --- | --- |
+  | `LBPD` | Police | `LBFD` | Fire / lifeguard / marine |
+  | `POLB` | Port of Long Beach | `USCG` | Coast Guard (harbor) |
+  | `LBC` | City gov / utilities / works | `LBT` | Transit |
+  | `LBUSD` | Unified School District | `CSULB` | Cal State Long Beach |
+  | `LBCC` | City College | `LBMH` | Memorial paramedic base-hospital |
+
+- **Tag-per-agency, color-coded**, so you can filter the scan (or read the
+  heatmap) by service — watch just police + fire, or everything at once.
+- **Tones carried in channel names** (`[D031]`, `[PL 151.4]`) as a reference,
+  and **analog FM only** (digital P25/DMR/NXDN are noted but not demodulable).
+
+**Use it:** copy it into place as GQRX's bookmark file, then launch:
+
+```sh
+cp examples/long_beach_bookmarks.csv ~/.config/gqrx/bookmarks.csv
+```
+
+(If `~/.config/gqrx/bookmarks.csv` is absent, RF HotScan also falls back to a
+`bookmarks.csv` next to the app.) It is meant as a **template**: swap in your own
+city's agencies/frequencies following the same tag-per-agency, tone-in-name
+conventions — see [how it was built](#how-the-bundled-long-beach-bookmark-set-was-built)
+below.
+
 ### The bookmark file format
 
 GQRX's `bookmarks.csv` has two sections — a tag table and a channel table:
