@@ -31,7 +31,7 @@ import logging
 import threading
 import traceback
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox, filedialog
 
 BOOKMARKS = os.path.expanduser("~/.config/gqrx/bookmarks.csv")
 SETTINGS = os.path.expanduser("~/.config/gqrx/scanner_settings.json")
@@ -212,6 +212,130 @@ class GqrxClient:
     def set_af(self, db):
         return self._cmd(f"L AF {db:.1f}")[0]
 
+    def get_lna(self):
+        return float(self._cmd("l LNA_GAIN")[0])
+
+    def set_lna(self, db):
+        return self._cmd(f"L LNA_GAIN {db:.1f}")[0]
+
+
+# --------------------------------------------------------------------------
+# GQRX config file (default.conf) — for settings the remote protocol can't set
+# (e.g. SDR device, sample rate). GQRX reads this only at startup and rewrites
+# it on exit, so it must be edited while GQRX is CLOSED, then GQRX relaunched.
+# --------------------------------------------------------------------------
+GQRX_CONF = os.path.expanduser("~/.config/gqrx/default.conf")
+
+# friendly name -> (INI section, key, formatter, needs_restart)
+CONF_KEYS = {
+    "device":      ("input",    "device",      lambda v: f'"{v}"',   True),
+    "sample_rate": ("input",    "sample_rate", lambda v: str(int(v)), True),
+    "agc_off":     ("receiver", "agc_off",     lambda v: "true" if v in (True, "true", "True", 1) else "false", False),
+    "demod":       ("receiver", "demod",       lambda v: str(v),      False),
+    "sql_level":   ("receiver", "sql_level",   lambda v: str(int(float(v))), False),
+}
+
+
+class GqrxConfig:
+    """Minimal, structure-preserving editor for GQRX's default.conf."""
+
+    def __init__(self, path=GQRX_CONF):
+        self.path = path
+
+    def read(self):
+        """Return {friendly_name: raw_value_without_surrounding_quotes}."""
+        want = {(s, k): name for name, (s, k, _, _) in CONF_KEYS.items()}
+        found, section = {}, None
+        try:
+            with open(self.path) as f:
+                for line in f:
+                    t = line.strip()
+                    if t.startswith("[") and t.endswith("]"):
+                        section = t[1:-1]
+                    elif "=" in t and not t.startswith("#"):
+                        key, _, val = t.partition("=")
+                        name = want.get((section, key.strip()))
+                        if name:
+                            found[name] = val.strip().strip('"')
+        except FileNotFoundError:
+            pass
+        return found
+
+    def write(self, updates):
+        """Apply {friendly_name: value} to default.conf, preserving everything
+        else (binary gain blobs, window geometry, comments, ordering)."""
+        targets = {}  # (section, key) -> formatted string
+        for name, value in updates.items():
+            section, key, fmt, _ = CONF_KEYS[name]
+            targets[(section, key)] = fmt(value)
+        with open(self.path) as f:
+            lines = f.readlines()
+        out, section, done = [], None, set()
+        for line in lines:
+            t = line.strip()
+            if t.startswith("[") and t.endswith("]"):
+                # before leaving a section, append any of its keys not yet seen
+                for (sec, key), val in targets.items():
+                    if sec == section and (sec, key) not in done:
+                        out.append(f"{key}={val}\n")
+                        done.add((sec, key))
+                section = t[1:-1]
+                out.append(line)
+                continue
+            if "=" in t and not t.startswith("#"):
+                key = t.split("=", 1)[0].strip()
+                if (section, key) in targets:
+                    out.append(f"{key}={targets[(section, key)]}\n")
+                    done.add((section, key))
+                    continue
+            out.append(line)
+        # any sections/keys that didn't exist at all
+        for (sec, key), val in targets.items():
+            if (sec, key) not in done:
+                out.append(f"[{sec}]\n{key}={val}\n")
+                done.add((sec, key))
+        with open(self.path, "w") as f:
+            f.writelines(out)
+
+    def snapshot(self, dest):
+        import shutil
+        shutil.copy2(self.path, dest)
+
+    def restore(self, src):
+        import shutil
+        shutil.copy2(src, self.path)
+
+
+def gqrx_is_running():
+    # The macOS process is "gqrx" (lowercase, inside Gqrx.app); match either.
+    try:
+        out = __import__("subprocess").run(
+            ["pgrep", "-i", "-x", "gqrx"], capture_output=True, text=True)
+        return bool(out.stdout.strip())
+    except Exception:
+        return False
+
+
+def gqrx_quit(timeout=8.0):
+    """Ask GQRX to quit cleanly (so it doesn't flag a crash) and wait."""
+    import subprocess
+    try:
+        subprocess.run(["osascript", "-e", 'tell application "Gqrx" to quit'],
+                       capture_output=True, text=True, timeout=6)
+    except Exception:
+        subprocess.run(["pkill", "-i", "-x", "gqrx"], capture_output=True)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if not gqrx_is_running():
+            return True
+        time.sleep(0.3)
+    return not gqrx_is_running()
+
+
+def gqrx_launch():
+    import subprocess
+    subprocess.run(["open", "-a", "Gqrx"], capture_output=True)
+
 
 # --------------------------------------------------------------------------
 # Scanner engine (background thread)
@@ -233,7 +357,8 @@ class Scanner:
             "squelch_mode": "auto",       # "auto" | "global"
             "global_sql": -50.0,
             "auto_margin": 8.0,
-            "settle_ms": 80,
+            "settle_ms": 350,   # dwell per channel; must cover GQRX's ~360 ms
+                                # meter lag or signals are read 2-3 channels late
             "hold_s": 3.0,
             "priority_interval": 6.0,
         }
@@ -241,10 +366,12 @@ class Scanner:
         self.last_active = {}
 
         self.ui = {"state": "STOPPED", "cur": None, "strength": -120.0,
-                   "thresh": -50.0, "msg": "", "gqrx_sql": None, "af": None}
+                   "thresh": -50.0, "msg": "", "gqrx_sql": None, "af": None,
+                   "lna": None}
         self.logq = queue.Queue()
         self.actions = queue.Queue()
 
+        self.orig = None     # GQRX's state before RF HotScan touched it
         self.alive = True
         self.run = threading.Event()
         self.skip = threading.Event()
@@ -339,6 +466,22 @@ class Scanner:
         time.sleep(settle + extra)
         return thr
 
+    def _settled_strength(self, reads=3, step=0.025):
+        """Sample the strength meter a few times and return the MAX.
+
+        IMPORTANT: GQRX's signal meter is heavily smoothed and lags a retune by
+        ~360 ms (measured): for ~150 ms it still reports the PREVIOUS channel,
+        then ramps to the new level. The dwell that lets the meter catch up is
+        the per-hop settle in _tune (settle_ms) — it must be long enough (~350
+        ms) or the scanner reads stale levels and stops 2-3 channels late. This
+        method just takes a short final-window max to ride out meter ripple and
+        catch brief peaks; it does NOT itself wait out the lag."""
+        vals = [self.client.strength()]
+        for _ in range(max(0, reads - 1)):
+            time.sleep(step)
+            vals.append(self.client.strength())
+        return max(vals)
+
     def _verify(self, ch):
         """Read GQRX back to confirm the tune/squelch took effect (debug only)."""
         try:
@@ -389,7 +532,7 @@ class Scanner:
                             continue
 
                     thr = self._tune(ch)
-                    s = self.client.strength()
+                    s = self._settled_strength()
                     self._hops += 1
                     self._set_ui(state="SCANNING", cur=ch, strength=s, thresh=thr)
                     logger.debug("HOP #%d %.4f %s  s=%.1f thr=%.1f %s",
@@ -414,7 +557,7 @@ class Scanner:
             if not ch:
                 continue
             thr = self._tune(ch)
-            s = self.client.strength()
+            s = self._settled_strength()
             self._set_ui(cur=ch, strength=s, thresh=thr)
             logger.debug("PRIO-CHECK %.4f s=%.1f thr=%.1f", freq / 1e6, s, thr)
             if s >= thr:
@@ -493,10 +636,20 @@ class Scanner:
                         db = kw.get("db", 0.0)
                         self.client.set_af(db)
                         self.log(f"Audio gain set {db:.0f} dB")
+                elif name == "set_lna":
+                    if self.client.connected:
+                        db = kw.get("db", 0.0)
+                        self.client.set_lna(db)
+                        self.log(f"RF/LNA gain set {db:.0f} dB")
                 elif name == "goto":
                     ch = self._channel_by_freq(kw["freq"])
                     if ch and self.client.connected:
                         self._tune(ch, force_sql=True)
+                        s = self._settled_strength()
+                        self._set_ui(cur=ch, strength=s,
+                                     thresh=self.effective_threshold(ch["freq"]))
+                        self.log(f"Tuned GQRX to {ch['name']} "
+                                 f"({ch['freq']/1e6:.4f} MHz)")
                         self._verify(ch)
             except (ConnectionError, OSError) as e:
                 logger.warning("socket error in action %s: %s", name, e)
@@ -510,16 +663,48 @@ class Scanner:
             self._last_mode = self._last_band = self._last_sql = None
             self._last_sqlpoll = 0.0
             self.log("Connected to GQRX remote (127.0.0.1:7356)")
-            # Reflect GQRX's current squelch + audio gain in the GUI on connect.
+            # Capture GQRX's pre-scan state ONCE so we can hand it back on exit
+            # (so RF HotScan doesn't pollute the user's GQRX session).
+            if self.orig is None:
+                try:
+                    mode, pb = self.client.get_mode()
+                    self.orig = {"freq": self.client.get_freq(), "mode": mode,
+                                 "pb": pb, "sql": self.client.get_sql(),
+                                 "af": self.client.get_af()}
+                    logger.info("captured original GQRX state: %s", self.orig)
+                except Exception as e:
+                    logger.warning("could not capture GQRX state: %s", e)
+            # Reflect GQRX's current squelch + audio/RF gain in the GUI.
             try:
                 self._set_ui(gqrx_sql=self.client.get_sql(),
                              af=self.client.get_af())
+            except Exception:
+                pass
+            try:
+                self._set_ui(lna=self.client.get_lna())
             except Exception:
                 pass
             self._set_ui(state="STOPPED", msg="")
         except Exception as e:
             self.log(f"Connect failed: {e}", level=logging.WARNING)
             self._set_ui(state="DISCONNECTED")
+
+    def restore_original(self):
+        """Put GQRX back the way we found it (frequency, mode, squelch, gain).
+        Call this when RF HotScan exits so the user's GQRX session is preserved."""
+        if not self.orig or not self.client.connected:
+            return
+        o = self.orig
+        try:
+            pb = int(float(o["pb"])) if str(o["pb"]).strip() else 0
+            self.client.set_mode(o["mode"], pb)
+            self.client.set_freq(o["freq"])
+            self.client.set_sql(o["sql"])
+            self.client.set_af(o["af"])
+            self.log(f"Restored GQRX to its pre-scan state "
+                     f"({o['freq']/1e6:.4f} MHz, {o['mode']})")
+        except Exception as e:
+            logger.warning("restore failed: %s", e)
 
     def _maybe_poll_sql(self):
         """Read GQRX's squelch periodically so a change made in GQRX (or any
@@ -612,7 +797,9 @@ class Scanner:
             self.band_floor = results
         margin = self.get_cfg("auto_margin")
         self.log(f"Noise floor done. Auto squelch = floor + {margin:.0f} dB.")
-        self._set_ui(state="STOPPED", msg="Noise floor updated")
+        # Reset banner/meter to idle so the calibration display doesn't linger.
+        self._set_ui(state="STOPPED", cur=None, msg="Noise floor updated",
+                     strength=-120.0, thresh=-100.0)
         self._last_mode = self._last_sql = None
         if was_scanning:           # resume scanning if it was running
             self.run.set()
@@ -638,6 +825,9 @@ class ScannerGUI:
         self.iid_cid = {}        # tree item id -> cid
         self._suppress_push = False   # guard: syncing slider FROM gqrx, don't push back
         self._af_inited = False       # audio-gain slider initialised from gqrx yet?
+        self._rf_inited = False       # RF/LNA-gain slider initialised yet?
+        self._save_counter = 0        # autosave throttle (refresh ticks)
+        self._last_saved = ""         # last-persisted settings snapshot (json)
 
         self._load_settings()
         self._build_style()
@@ -771,14 +961,20 @@ class ScannerGUI:
                                  command=lambda: self.scanner.request("noise_floor"))
         self.btn_nf.pack(fill="x", padx=12, pady=(6, 0))
 
-        self._section(p, "AUDIO")
+        self._section(p, "AUDIO / RF")
         self.af_gain = tk.DoubleVar(value=0.0)
         _, self._af_label = self._slider(
             p, "Audio gain", self.af_gain, -80, 50, "dB", self._apply_gain)
+        self.rf_gain = tk.DoubleVar(value=0.0)
+        _, self._rf_label = self._slider(
+            p, "RF gain (LNA)", self.rf_gain, 0, 50, "dB", self._apply_rf_gain)
+        ttk.Button(p, text="⚙ GQRX Setup (device / rate)…",
+                   command=self._open_gqrx_setup).pack(fill="x", padx=12,
+                                                       pady=(8, 0))
 
         self._section(p, "TIMING")
         self.settle = tk.DoubleVar(value=self.scanner.get_cfg("settle_ms"))
-        self._slider(p, "Settle per hop", self.settle, 20, 300, "ms",
+        self._slider(p, "Dwell / channel", self.settle, 100, 700, "ms",
                      self._apply_sliders)
         self.hold = tk.DoubleVar(value=self.scanner.get_cfg("hold_s"))
         self._slider(p, "Hold after loss", self.hold, 0.5, 15, "s",
@@ -950,8 +1146,141 @@ class ScannerGUI:
         if not self._suppress_push:
             self.scanner.request("set_af", db=self.af_gain.get())
 
+    def _apply_rf_gain(self, _=None):
+        if not self._suppress_push:
+            self.scanner.request("set_lna", db=self.rf_gain.get())
+
     def _apply_priority(self, _=None):
         self.scanner.set_cfg(priority_interval=self.prio_int.get())
+
+    # ---- GQRX config-file setup (device / sample rate; needs GQRX restart) ----
+    def _open_gqrx_setup(self):
+        cfg = GqrxConfig()
+        cur = cfg.read()
+        win = tk.Toplevel(self.root)
+        win.title("GQRX Setup — default.conf")
+        win.configure(bg=PANEL)
+        win.geometry("440x440")
+        win.transient(self.root)
+
+        tk.Label(win, text="GQRX device & DSP settings", bg=PANEL, fg=FG,
+                 font=("Helvetica", 13, "bold")).pack(anchor="w", padx=14,
+                                                      pady=(14, 2))
+        tk.Label(win, text="These live in ~/.config/gqrx/default.conf, which GQRX\n"
+                 "only reads at startup. Applying will QUIT and RELAUNCH GQRX.\n"
+                 "After it restarts you must re-enable Tools → Remote control,\n"
+                 "then press Reconnect here.", bg=PANEL, fg=MUTED,
+                 font=("Helvetica", 10), justify="left").pack(anchor="w",
+                                                              padx=14, pady=(0, 10))
+
+        form = tk.Frame(win, bg=PANEL)
+        form.pack(fill="x", padx=14)
+        v_device = tk.StringVar(value=cur.get("device", "rtl=0"))
+        v_rate = tk.StringVar(value=cur.get("sample_rate", "1800000"))
+        v_demod = tk.StringVar(value=cur.get("demod", "Narrow FM"))
+        v_agc = tk.BooleanVar(value=cur.get("agc_off", "true") == "true")
+
+        def row(label, widget):
+            r = tk.Frame(form, bg=PANEL)
+            r.pack(fill="x", pady=4)
+            tk.Label(r, text=label, bg=PANEL, fg=FG, width=14, anchor="w",
+                     font=("Helvetica", 11)).pack(side="left")
+            widget.pack(side="left", fill="x", expand=True)
+
+        row("Device", ttk.Entry(form, textvariable=v_device))
+        row("Sample rate", ttk.Combobox(
+            form, textvariable=v_rate, values=[
+                "250000", "1024000", "1800000", "2048000", "2400000",
+                "2560000", "3200000"]))
+        row("Demod", ttk.Combobox(form, textvariable=v_demod, values=[
+            "Demod Off", "Raw I/Q", "AM", "AM-Sync", "Narrow FM",
+            "WFM (mono)", "WFM (stereo)", "LSB", "USB", "CW-L", "CW-U"]))
+        agc = tk.Frame(form, bg=PANEL)
+        agc.pack(fill="x", pady=4)
+        ttk.Checkbutton(agc, text="AGC off (recommended for scanning)",
+                        variable=v_agc).pack(side="left")
+
+        btns = tk.Frame(win, bg=PANEL)
+        btns.pack(fill="x", padx=14, pady=14, side="bottom")
+
+        def do_snapshot():
+            dest = filedialog.asksaveasfilename(
+                parent=win, title="Snapshot GQRX config to…",
+                initialdir=os.path.dirname(GQRX_CONF),
+                initialfile="default.conf.snapshot")
+            if dest:
+                cfg.snapshot(dest)
+                self.scanner.log(f"GQRX config snapshot -> {dest}")
+                messagebox.showinfo("Snapshot", f"Saved:\n{dest}", parent=win)
+
+        def do_restore():
+            src = filedialog.askopenfilename(
+                parent=win, title="Restore GQRX config from snapshot…",
+                initialdir=os.path.dirname(GQRX_CONF))
+            if not src:
+                return
+            if not messagebox.askyesno(
+                    "Restore + restart GQRX",
+                    "Restore this config and restart GQRX?\nGQRX remote control "
+                    "will need re-enabling afterward.", parent=win):
+                return
+            self._gqrx_restart(lambda: cfg.restore(src), win,
+                               f"Restored config from {os.path.basename(src)}")
+
+        def do_apply():
+            updates = {"device": v_device.get().strip(),
+                       "sample_rate": v_rate.get().strip(),
+                       "demod": v_demod.get().strip(),
+                       "agc_off": v_agc.get()}
+            if not messagebox.askyesno(
+                    "Apply + restart GQRX",
+                    "Write these settings and restart GQRX now?\n\n"
+                    f"device = {updates['device']}\n"
+                    f"sample_rate = {updates['sample_rate']}\n"
+                    f"demod = {updates['demod']}\n"
+                    f"AGC off = {updates['agc_off']}\n\n"
+                    "A backup is made first. You'll need to re-enable\n"
+                    "Tools → Remote control after GQRX restarts.", parent=win):
+                return
+            self._gqrx_restart(lambda: cfg.write(updates), win,
+                               "Applied GQRX device/DSP settings")
+
+        ttk.Button(btns, text="Snapshot…", command=do_snapshot).pack(side="left")
+        ttk.Button(btns, text="Restore…", command=do_restore).pack(side="left",
+                                                                    padx=6)
+        ttk.Button(btns, text="Apply & Restart GQRX", style="Accent.TButton",
+                   command=do_apply).pack(side="right")
+
+    def _gqrx_restart(self, mutate_fn, win, ok_msg):
+        """Back up default.conf, quit GQRX, mutate the config, relaunch GQRX.
+        Runs on a worker thread so the UI stays responsive."""
+        self.scanner.run.clear()
+
+        def worker():
+            try:
+                ts = time.strftime("%Y%m%d-%H%M%S")
+                backup = f"{GQRX_CONF}.bak-{ts}"
+                GqrxConfig().snapshot(backup)
+                self.scanner.log(f"Backed up GQRX config -> {backup}")
+                if gqrx_is_running():
+                    self.scanner.log("Quitting GQRX…")
+                    if not gqrx_quit():
+                        self.scanner.log("GQRX did not quit cleanly; aborting",
+                                         level=logging.WARNING)
+                        return
+                mutate_fn()                       # edit default.conf while closed
+                self.scanner.log(ok_msg)
+                gqrx_launch()
+                self.scanner.log("Relaunched GQRX. Re-enable Tools → Remote "
+                                 "control, then press Reconnect.")
+            except Exception as e:
+                self.scanner.log(f"GQRX restart failed: {e}",
+                                 level=logging.ERROR)
+        threading.Thread(target=worker, daemon=True).start()
+        try:
+            win.destroy()
+        except Exception:
+            pass
 
     def _chan_for_iid(self, iid):
         cid = self.iid_cid.get(iid)
@@ -987,12 +1316,20 @@ class ScannerGUI:
                              + f" {ch['name']}")
         return "break"
 
-    def _on_tree_double(self, _):
-        sel = self.tree.selection()
-        if sel:
-            ch = self._chan_for_iid(sel[0])
-            if ch is not None:
-                self.scanner.request("goto", freq=ch["freq"])
+    def _on_tree_double(self, event):
+        # Double-click a row to tune GQRX there. If a scan is running, pause it
+        # first so the manual tune isn't immediately overwritten by the sweep.
+        row = self.tree.identify_row(event.y)
+        ch = self._chan_for_iid(row) if row else None
+        if ch is None:
+            sel = self.tree.selection()
+            ch = self._chan_for_iid(sel[0]) if sel else None
+        if ch is None:
+            return
+        if self.scanner.run.is_set():
+            self.scanner.run.clear()
+            self.btn_start.config(text="▶ Scan")
+        self.scanner.request("goto", freq=ch["freq"])
 
     # ---- periodic refresh ----
     def _refresh(self):
@@ -1017,6 +1354,11 @@ class ScannerGUI:
                 self.lbl_name.config(text=cur["name"])
                 self.lbl_freq.config(
                     text=f"{cur['freq']/1e6:.4f}  MHz   ·   {cur['mode']}")
+            else:
+                # idle (e.g. just after calibration finished) — clear the banner
+                self.tag_chip.config(text="  —  ", bg=PANEL2, fg=FG)
+                self.lbl_name.config(text="Idle")
+                self.lbl_freq.config(text="—  MHz")
         self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {thr:.0f})")
         self._draw_meter(s, thr)
         self._update_tree(cur)
@@ -1044,8 +1386,21 @@ class ScannerGUI:
             self._af_label.config(text=f"{af:.0f} dB")
             self._suppress_push = False
 
+        # initialise RF/LNA-gain slider from GQRX once after connect
+        lna = ui.get("lna")
+        if lna is not None and not self._rf_inited:
+            self._rf_inited = True
+            self._suppress_push = True
+            self.rf_gain.set(round(lna, 1))
+            self._rf_label.config(text=f"{lna:.0f} dB")
+            self._suppress_push = False
+
         self.btn_start.config(text="⏸ Pause" if self.scanner.run.is_set()
                               else "▶ Scan")
+        self._save_counter += 1
+        if self._save_counter >= 25:        # ~ every 3 s, persist if changed
+            self._save_counter = 0
+            self._autosave_tick()
         self.root.after(120, self._refresh)
 
     def _draw_meter(self, s, thr):
@@ -1136,7 +1491,7 @@ class ScannerGUI:
     def _sig(ch):
         return f"{ch['freq']}:{ch['name']}"
 
-    def _save_settings(self):
+    def _settings_dict(self):
         c = self.scanner.cfg
         d = {k: c[k] for k in ("squelch_mode", "global_sql", "auto_margin",
                                "settle_ms", "hold_s", "priority_interval")}
@@ -1146,15 +1501,41 @@ class ScannerGUI:
         by_cid = {ch["cid"]: ch for ch in self.chans}
         d["disabled"] = sorted(self._sig(by_cid[cid])
                                for cid in c["disabled_cids"] if cid in by_cid)
+        return d
+
+    def _save_settings(self):
         try:
+            d = self._settings_dict()
             with open(SETTINGS, "w") as f:
                 json.dump(d, f, indent=2)
+            self._last_saved = json.dumps(d, sort_keys=True)
+            logger.debug("settings saved -> %s", SETTINGS)
+        except Exception as e:
+            logger.warning("settings save failed: %s", e)
+
+    def _autosave_tick(self):
+        """Persist settings whenever they change, so selections survive even an
+        unclean exit. Called on a throttle from the refresh loop."""
+        try:
+            cur = json.dumps(self._settings_dict(), sort_keys=True)
         except Exception:
-            pass
+            return
+        if cur != self._last_saved:
+            self._save_settings()
 
     def _on_close(self):
-        self.scanner.alive = False
+        # Stop the engine first so it isn't mid-command, then hand GQRX back to
+        # the state we found it in, then persist settings and close.
         self.scanner.run.clear()
+        self.scanner.alive = False
+        try:
+            self.scanner.thread.join(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            self.scanner.restore_original()
+        except Exception:
+            pass
         self._save_settings()
         try:
             self.client.close()

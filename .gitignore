@@ -17,3 +17,6 @@ scanner_settings.json
 *.pdf
 /Frequency_Reference/
 reference/
+
+# Local-only development notes, screenshots and progress log (maintainer/agents)
+/dev/
