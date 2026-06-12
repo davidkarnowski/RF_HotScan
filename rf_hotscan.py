@@ -727,14 +727,17 @@ class Scanner:
                 logger.error("action %s failed:\n%s", name, traceback.format_exc())
 
     def _reconnect(self):
+        is_rtl = hasattr(self.client, "sweep")
         try:
             self.client.connect()
             self._last_mode = self._last_band = self._last_sql = None
             self._last_sqlpoll = 0.0
-            self.log("Connected to GQRX remote (127.0.0.1:7356)")
+            self.log("Connected to RTL-SDR dongle" if is_rtl
+                     else "Connected to GQRX remote (127.0.0.1:7356)")
             # Capture GQRX's pre-scan state ONCE so we can hand it back on exit
-            # (so RF HotScan doesn't pollute the user's GQRX session).
-            if self.orig is None:
+            # (so RF HotScan doesn't pollute the user's GQRX session). The RTL
+            # backend owns the dongle outright — nothing to restore.
+            if not is_rtl and self.orig is None:
                 try:
                     mode, pb = self.client.get_mode()
                     self.orig = {"freq": self.client.get_freq(), "mode": mode,
@@ -892,7 +895,18 @@ class ScannerGUI:
         for i, c in enumerate(self.chans):
             c["cid"] = i
         self.bands = cluster_bands(self.chans)
-        self.client = GqrxClient()
+        # Direct RTL-SDR is the default backend when its deps are available;
+        # fall back to the GQRX remote backend otherwise.
+        if RTL_AVAILABLE:
+            try:
+                self.client = rtl_backend.RtlBackend()
+                self._initial_backend = "rtl"
+            except Exception:
+                self.client = GqrxClient()
+                self._initial_backend = "gqrx"
+        else:
+            self.client = GqrxClient()
+            self._initial_backend = "gqrx"
         self.scanner = Scanner(self.client, self.tags, self.chans, self.bands)
         self.tag_btns = {}
         self.tree_iid = {}       # cid -> tree item id
@@ -902,12 +916,17 @@ class ScannerGUI:
         self._rf_inited = False       # RF/LNA-gain slider initialised yet?
         self._save_counter = 0        # autosave throttle (refresh ticks)
         self._last_saved = ""         # last-persisted settings snapshot (json)
-        self._backend_kind = "gqrx"   # active backend ("gqrx" | "rtl")
+        self._backend_kind = self._initial_backend
 
         self._load_settings()
+        # apply the active backend's recommended per-channel dwell
+        self.scanner.set_cfg(
+            settle_ms=int(getattr(self.client, "recommended_settle_ms", 350)))
         self._build_style()
         self._build_ui()
         self._rebuild_tree()
+        self.backend_var.set(self._backend_kind)
+        self._apply_backend_ui()
 
         self.scanner.request("reconnect")
         self.root.after(150, self._refresh)
@@ -998,14 +1017,20 @@ class ScannerGUI:
                   lambda e: ctrl_canvas.configure(
                       scrollregion=ctrl_canvas.bbox("all")))
 
+        self._build_controls(ctrl)
+
+        # Two-finger trackpad / scroll-wheel scrolling. macOS Tk sends
+        # <MouseWheel> with a small delta; bind it on every control widget (not
+        # just the canvas) so it works wherever the pointer is over the panel.
         def _wheel(e):
             ctrl_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
-        # only capture the wheel while the pointer is over the control panel
-        ctrl_canvas.bind("<Enter>",
-                         lambda e: ctrl_canvas.bind_all("<MouseWheel>", _wheel))
-        ctrl_canvas.bind("<Leave>",
-                         lambda e: ctrl_canvas.unbind_all("<MouseWheel>"))
-        self._build_controls(ctrl)
+            return "break"
+
+        def _bind_wheel(w):
+            w.bind("<MouseWheel>", _wheel)
+            for child in w.winfo_children():
+                _bind_wheel(child)
+        _bind_wheel(ctrl_canvas)
         rightcol = tk.Frame(body, bg=BG)
         rightcol.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self._build_taglist(rightcol)
@@ -1085,17 +1110,18 @@ class ScannerGUI:
         self.rf_gain = tk.DoubleVar(value=0.0)
         _, self._rf_label = self._slider(
             p, "RF gain (LNA)", self.rf_gain, 0, 50, "dB", self._apply_rf_gain)
-        ttk.Button(p, text="⚙ GQRX Setup (device / rate)…",
-                   command=self._open_gqrx_setup).pack(fill="x", padx=12,
-                                                       pady=(8, 0))
+        self.btn_setup = ttk.Button(p, text="⚙ GQRX Setup (device / rate)…",
+                                    command=self._open_setup)
+        self.btn_setup.pack(fill="x", padx=12, pady=(8, 0))
 
         self._section(p, "TIMING")
         self.settle = tk.DoubleVar(value=self.scanner.get_cfg("settle_ms"))
-        self._slider(p, "Dwell / channel", self.settle, 100, 700, "ms",
-                     self._apply_sliders)
+        self._settle_frame, _ = self._slider(
+            p, "Dwell / channel", self.settle, 100, 700, "ms",
+            self._apply_sliders)
         self.hold = tk.DoubleVar(value=self.scanner.get_cfg("hold_s"))
-        self._slider(p, "Hold after loss", self.hold, 0.5, 15, "s",
-                     self._apply_sliders)
+        self._hold_frame, _ = self._slider(
+            p, "Hold after loss", self.hold, 0.5, 15, "s", self._apply_sliders)
 
         self._section(p, "PRIORITY")
         tk.Label(p, text="Tick the ★ column in the list\nto flag priority channels.",
@@ -1147,8 +1173,12 @@ class ScannerGUI:
             self.tag_btns[tag] = b
 
     def _build_channel_list(self, parent):
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="both", expand=True)
         cols = ("on", "prio", "freq", "name", "tag", "status", "last")
-        self.tree = ttk.Treeview(parent, columns=cols, show="headings", height=12)
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=12)
+        tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tsb.set)
         layout = (("on", 36, "On"), ("prio", 34, "★"), ("freq", 95, "Freq MHz"),
                   ("name", 290, "Channel"), ("tag", 70, "Tag"),
                   ("status", 80, "Status"), ("last", 90, "Last active"))
@@ -1161,9 +1191,14 @@ class ScannerGUI:
             self.tree.tag_configure(tag, foreground=color)
         self.tree.tag_configure("locked", foreground=MUTED)
         self.tree.tag_configure("disabled", foreground="#5a5a5a")
-        self.tree.pack(fill="both", expand=True)
+        tsb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Double-1>", self._on_tree_double)
+        # two-finger / wheel scroll over the channel list
+        self.tree.bind("<MouseWheel>",
+                       lambda e: (self.tree.yview_scroll(-1 if e.delta > 0 else 1,
+                                                         "units"), "break")[1])
         for c in sorted(self.chans, key=lambda c: c["freq"]):
             iid = self.tree.insert("", "end", values=(
                 "☑", "", f"{c['freq']/1e6:.4f}", c["name"], c["tag"], "", ""),
@@ -1246,8 +1281,30 @@ class ScannerGUI:
         settle = int(getattr(new, "recommended_settle_ms", 350))
         sc.set_cfg(settle_ms=settle)
         self.settle.set(settle)
+        self._apply_backend_ui()
         self.scanner.log(f"Backend → {'RTL-SDR (direct)' if kind=='rtl' else 'GQRX'}")
         self.scanner.request("reconnect")
+
+    def _apply_backend_ui(self):
+        """Show only the controls that apply to the active backend."""
+        rtl = (self._backend_kind == "rtl")
+        self.btn_reconnect.config(text="⟳ Reconnect SDR" if rtl
+                                  else "⟳ Reconnect GQRX")
+        self.btn_setup.config(text="⚙ SDR Setup (rate / ppm)…" if rtl
+                              else "⚙ GQRX Setup (device / rate)…")
+        # Per-channel dwell only exists to outwait GQRX's slow meter; the RTL
+        # sweep doesn't use it, so hide it in direct mode.
+        if rtl:
+            self._settle_frame.pack_forget()
+        else:
+            self._settle_frame.pack(fill="x", padx=12, pady=(6, 0),
+                                    before=self._hold_frame)
+
+    def _open_setup(self):
+        if self._backend_kind == "rtl":
+            self._open_sdr_setup()
+        else:
+            self._open_gqrx_setup()
 
     def _restyle_tag(self, tag, on):
         color = self.tags[tag]
@@ -1316,6 +1373,55 @@ class ScannerGUI:
 
     def _apply_priority(self, _=None):
         self.scanner.set_cfg(priority_interval=self.prio_int.get())
+
+    # ---- RTL-SDR device setup (sample rate / ppm; reopens the dongle) ----
+    def _open_sdr_setup(self):
+        be = self.client
+        win = tk.Toplevel(self.root)
+        win.title("SDR Setup — RTL-SDR")
+        win.configure(bg=PANEL)
+        win.geometry("360x230")
+        win.transient(self.root)
+        tk.Label(win, text="RTL-SDR device", bg=PANEL, fg=FG,
+                 font=("Helvetica", 13, "bold")).pack(anchor="w", padx=14,
+                                                      pady=(14, 2))
+        tk.Label(win, text="Higher sample rate = wider capture windows = fewer\n"
+                 "captures per sweep (faster), but more USB load. 2.4 MS/s is the\n"
+                 "common stable max. Applying reopens the dongle.", bg=PANEL,
+                 fg=MUTED, font=("Helvetica", 10), justify="left").pack(
+                     anchor="w", padx=14, pady=(0, 10))
+        form = tk.Frame(win, bg=PANEL)
+        form.pack(fill="x", padx=14)
+        v_rate = tk.StringVar(value=str(int(getattr(be, "sample_rate", 2400000))))
+        v_ppm = tk.StringVar(value=str(int(getattr(be, "ppm", 0))))
+
+        def row(lbl, widget):
+            r = tk.Frame(form, bg=PANEL)
+            r.pack(fill="x", pady=4)
+            tk.Label(r, text=lbl, bg=PANEL, fg=FG, width=12, anchor="w",
+                     font=("Helvetica", 11)).pack(side="left")
+            widget.pack(side="left", fill="x", expand=True)
+        row("Sample rate", ttk.Combobox(form, textvariable=v_rate, values=[
+            "1024000", "1800000", "2048000", "2400000", "2560000", "3200000"]))
+        row("PPM correction", ttk.Entry(form, textvariable=v_ppm))
+
+        def apply():
+            try:
+                rate = int(v_rate.get()); ppm = int(v_ppm.get())
+            except ValueError:
+                return
+            self.scanner.run.clear()
+            self.btn_start.config(text="▶ Scan")
+            try:
+                be.sample_rate = rate
+                be.ppm = ppm
+            except Exception:
+                pass
+            self.scanner.log(f"SDR: rate {rate/1e6:.3f} MS/s, ppm {ppm} — reopening")
+            self.scanner.request("reconnect")
+            win.destroy()
+        ttk.Button(win, text="Apply & reopen dongle", style="Accent.TButton",
+                   command=apply).pack(side="bottom", padx=14, pady=14)
 
     # ---- GQRX config-file setup (device / sample rate; needs GQRX restart) ----
     def _open_gqrx_setup(self):

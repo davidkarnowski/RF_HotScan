@@ -200,10 +200,18 @@ class RtlBackend:
         self._audio_live = False            # has the audio stream produced a block?
         self._hold_t0 = 0.0
         self._meas = None                   # cached FMDemod for level reads
+        self._demod = None                  # the live playback demod (for live volume)
 
     # ---- device lifecycle ----
     def connect(self):
+        self.stop_audio()
         with self.lock:
+            if self.sdr is not None:           # idempotent: reopen with current params
+                try:
+                    self.sdr.close()
+                except Exception:
+                    pass
+                self.sdr = None
             self.sdr = RtlSdr()
             self.sdr.sample_rate = self.sample_rate
             if self.ppm:
@@ -263,7 +271,8 @@ class RtlBackend:
     def sweep(self, freqs, bw=None):
         """Return {freq_hz: power_dbfs} using as few captures as bandwidth allows."""
         bw = bw or self.channel_bw
-        windows = plan_windows(freqs)
+        usable = int(self.sample_rate * 5 / 6)     # ~usable BW for this rate
+        windows = plan_windows(freqs, usable=usable)
         out = {}
         for center, members in windows:
             iq = self._capture(center)
@@ -303,6 +312,7 @@ class RtlBackend:
         demod = FMDemod(self.sample_rate, self.AUDIO_RATE,
                         channel_offset=channel_hz - center)
         demod.volume = 10.0 ** (self.volume_db / 20.0)
+        self._demod = demod                         # expose for live volume changes
         aq = _queue.Queue(maxsize=32)                # ~0.7 s of audio max
         self._audio_stop.clear()
         lead = {"buf": np.zeros(0, dtype=np.float32)}
@@ -364,6 +374,7 @@ class RtlBackend:
             except Exception:
                 pass
             self._playing = False
+            self._demod = None
 
     def _request_stop(self):
         self._audio_stop.set()
@@ -449,6 +460,9 @@ class RtlBackend:
 
     def set_af(self, db):
         self.volume_db = float(db)
+        d = self._demod                         # live volume change while playing
+        if d is not None:
+            d.volume = 10.0 ** (self.volume_db / 20.0)
 
     def get_lna(self):
         return float(self.gain)
