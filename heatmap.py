@@ -1158,6 +1158,7 @@ class HeatmapTab(tk.Frame):
         # Pausing/resuming is tied to ACTUAL capture execution, not tab switching.
         self.coord = sdr_coordinator
         self._coord_active = False
+        self._done_session = None       # last session shown after completion
         self.vars = {}
         self._build()
         self.after(150, self._refresh)
@@ -1221,7 +1222,9 @@ class HeatmapTab(tk.Frame):
         }
         for k, v in defs.items():
             V[k] = tk.StringVar(value=v)
-        V["device"] = tk.StringVar(value="fake")
+        # Default to the real dongle (#0) — direct SDR is the primary path;
+        # "fake" is the synthetic test source, chosen explicitly.
+        V["device"] = tk.StringVar(value="0")
         V["colormap"] = tk.StringVar(value="inferno")
         V["iq_mode"] = tk.StringVar(value="off")
         V["dmin"] = tk.StringVar(value="auto")
@@ -1238,7 +1241,7 @@ class HeatmapTab(tk.Frame):
         self._row(p, "Crop", V["crop"])
         self._row(p, "Overlap (Hz)", V["overlap_hz"])
         self._row(p, "Duration (s)", V["duration"])
-        self._row(p, "Device", V["device"], ["fake", "0", "1"])
+        self._row(p, "Device", V["device"], ["0", "1", "fake"])
         self._row(p, "IQ dumps", V["iq_mode"], ["off", "manual", "activity"])
         self._row(p, "Margin dB", V["margin_db"])
         self._row(p, "Colormap", V["colormap"], list(COLORMAPS.keys()))
@@ -1326,6 +1329,9 @@ class HeatmapTab(tk.Frame):
         # the GQRX case (coordinator returns None) just open their own path.
         borrowed = None
         is_real = str(cfg.device).lower() not in ("fake", "sim", "synthetic")
+        if not is_real:
+            self._logline("NOTE: device='fake' — SYNTHETIC test source, NOT real "
+                          "RF. Set Device to 0 to use the RTL-SDR dongle.")
         if is_real and self.coord is not None:
             try:
                 borrowed = self.coord.begin_external_use("heatmap")
@@ -1449,10 +1455,13 @@ class HeatmapTab(tk.Frame):
         # once. Tied to capture execution, not tab switching.
         if ui["state"] in ("DONE", "ERROR", "IDLE") and self._coord_active:
             self._release_coord()
-        if ui["state"] in ("DONE",) and self.recorder.last_ranges is not None:
-            if not self.tree.get_children() and self.recorder.last_ranges:
-                self._fill_tree(self.recorder.last_ranges)
-                self._refresh_sessions()
+        # On the edge into DONE: show this capture's detected ranges and select
+        # the just-finished session in the dropdown (so Render/Export use it, not
+        # a stale older session).
+        if ui["state"] == "DONE" and self.recorder.last_session != self._done_session:
+            self._done_session = self.recorder.last_session
+            self._fill_tree(self.recorder.last_ranges or [])
+            self._refresh_sessions(select=self.recorder.last_session)
         self.after(150, self._refresh)
 
     def _fill_tree(self, ranges):
@@ -1463,7 +1472,7 @@ class HeatmapTab(tk.Frame):
                 "%.4f – %.4f" % (r["f_lo"] / 1e6, r["f_hi"] / 1e6),
                 "%.1f" % r["peak_dbfs"], "%.0f" % (r["duty"] * 100)))
 
-    def _refresh_sessions(self):
+    def _refresh_sessions(self, select=None):
         try:
             sess = self.recorder.db.list_sessions()
         except Exception:
@@ -1471,7 +1480,12 @@ class HeatmapTab(tk.Frame):
         items = ["#%d: %s (%d sw)" % (s["id"], s.get("label") or "—",
                                       s.get("n_sweeps") or 0) for s in sess]
         self.sess_combo["values"] = items
-        if items and not self.sess_var.get():
+        if select is not None:
+            for it in items:
+                if it.startswith("#%d:" % select):
+                    self.sess_var.set(it)
+                    break
+        elif items and not self.sess_var.get():
             self.sess_var.set(items[0])
 
     def _logline(self, msg):
