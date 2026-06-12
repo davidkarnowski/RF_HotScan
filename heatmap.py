@@ -124,7 +124,7 @@ class SweepConfig:
 
     def __init__(self, f_start, f_stop, samp_rate=SAMPLE_RATE, bin_hz=3000.0,
                  gain="auto", ppm=0, dwell_s=0.05, n_avg=8, crop=0.20,
-                 overlap_hz=0, device="fake", duration_s=30.0, max_sweeps=0,
+                 overlap_hz=0, device="0", duration_s=30.0, max_sweeps=0,
                  dmin=-100.0, dmax=-20.0, colormap="inferno", margin_db=8.0,
                  iq_mode="off", label=""):
         _lazy_np()
@@ -292,9 +292,13 @@ class SweepSource:
 
 
 class FakeSweepSource(SweepSource):
-    """Synthetic spectrum: noise floor + scheduled keyed transmitters + a DC
-    spike + edge roll-off. Deterministic (seeded). Exercises the full pipeline
-    with no hardware."""
+    """TESTING ONLY — a synthetic spectrum, never an operational source.
+
+    Noise floor + scheduled keyed transmitters + a DC spike + edge roll-off,
+    deterministic (seeded). It exists so the test suite (`test_heatmap.py`) and
+    the explicit `--device fake` CLI dry-run can exercise the full pipeline with
+    no dongle. It is NOT offered in the GUI Device dropdown; selecting it produces
+    fabricated signals, not real RF."""
 
     def __init__(self, cfg, seed=1234):
         super().__init__(cfg)
@@ -1241,7 +1245,9 @@ class HeatmapTab(tk.Frame):
         self._row(p, "Crop", V["crop"])
         self._row(p, "Overlap (Hz)", V["overlap_hz"])
         self._row(p, "Duration (s)", V["duration"])
-        self._row(p, "Device", V["device"], ["0", "1", "fake"])
+        # Real dongle only in the GUI; the synthetic source is testing-only
+        # (CLI `--device fake` / the test suite), never an operational choice.
+        self._row(p, "Device", V["device"], ["0", "1"])
         self._row(p, "IQ dumps", V["iq_mode"], ["off", "manual", "activity"])
         self._row(p, "Margin dB", V["margin_db"])
         self._row(p, "Colormap", V["colormap"], list(COLORMAPS.keys()))
@@ -1498,7 +1504,7 @@ class HeatmapTab(tk.Frame):
 # ==========================================================================
 # Headless CLI / agent API
 # ==========================================================================
-def run_scan(f_start, f_stop, device="fake", db_path=DBPATH, png=None,
+def run_scan(f_start, f_stop, device="0", db_path=DBPATH, png=None,
              on_event=None, **kw):
     """Run one capture synchronously and return a JSON-able result dict.
 
@@ -1546,7 +1552,9 @@ def _cli(argv):
     s.add_argument("--n-avg", type=int, default=8)
     s.add_argument("--crop", type=float, default=0.20)
     s.add_argument("--overlap-hz", type=int, default=0)
-    s.add_argument("--device", default="fake", help="'fake' or device index")
+    s.add_argument("--device", default="0",
+                   help="RTL device index (0,1,...). 'fake' = synthetic TEST "
+                        "source, no hardware (testing/CI only).")
     s.add_argument("--duration", type=float, default=10.0)
     s.add_argument("--max-sweeps", type=int, default=0)
     s.add_argument("--margin-db", type=float, default=8.0)

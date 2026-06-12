@@ -195,8 +195,13 @@ over time into a time × frequency **activity** heatmap (the 2026 `rtl_power` +
   from `channel_power_dbfs`. Don't transfer a scanner squelch threshold to it;
   the heatmap only compares to its own floor/auto-range.
 - **Headless / agent:** `python -m heatmap scan|render|list|info` (machine JSON
-  on stdout via `--json`; `--device fake` for no hardware) and `run_scan(...)`.
-  Errors (e.g. `DongleBusy`) come back as structured JSON, not tracebacks.
+  on stdout via `--json`) and `run_scan(...)`. All operational defaults are the
+  real dongle (`--device 0`). Errors (e.g. `DongleBusy`) come back as structured
+  JSON, not tracebacks.
+- **Synthetic source is TESTING ONLY.** `FakeSweepSource` / `--device fake`
+  fabricates a spectrum with no hardware — for `test_heatmap.py` and no-dongle CI
+  dry runs only. It is not in the GUI Device dropdown and is never an operational
+  source. Keep it that way.
 - **Verify headless (no dongle):** `.venv/bin/python test_heatmap.py` — unit
   (tiling/quantise), DB round-trip + activity, dongle-coordination, borrow
   (mock backend), and a GUI smoke. All pass on the `FakeSweepSource`.

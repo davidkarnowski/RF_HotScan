@@ -124,8 +124,13 @@ The same engine runs without the GUI, for scripts or AI agents:
 .venv/bin/python -m heatmap info <session_id>                     # params + detected
 ```
 
-Use `--device fake` for a synthetic, no-hardware dry run that exercises the whole
-pipeline. `heatmap.run_scan(...)` is the equivalent Python API.
+`heatmap.run_scan(...)` is the equivalent Python API.
+
+> **Testing only:** `--device fake` selects a built-in *synthetic* source
+> (`FakeSweepSource`) that fabricates a deterministic spectrum with no dongle. It
+> exists solely for the test suite (`test_heatmap.py`) and no-hardware CI/dry
+> runs — it produces invented signals, not real RF, and is **not** offered in the
+> GUI. All operational paths (GUI and CLI) default to the real dongle (`0`).
 
 ---
 
