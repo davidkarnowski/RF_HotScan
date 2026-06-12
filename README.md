@@ -280,6 +280,43 @@ name, and let RF HotScan handle the rest.
 
 ---
 
+## Dependencies & licenses
+
+The **GQRX scanner core** (`rf_hotscan.py`, `clock.py`, `recorder.py`'s metadata
+layer) uses only the Python standard library (Python + Tkinter, PSF license) — no
+third-party code is imported or redistributed by this repo.
+
+The **direct RTL-SDR backend and the Heatmap** are optional and rely on
+third-party runtime dependencies that *you* install (they are **not** bundled or
+redistributed here). Their licenses:
+
+| Dependency | Used for | License |
+| --- | --- | --- |
+| Python + Tkinter | runtime + GUI | PSF (permissive) |
+| numpy | FFT / array math | BSD-3-Clause |
+| scipy | DSP filters, Welch PSD | BSD-3-Clause |
+| matplotlib | heatmap render + PNG export | Matplotlib license (BSD-style, PSF-based) |
+| sounddevice | audio playback | MIT |
+| PortAudio (via sounddevice) | audio I/O | MIT-style |
+| **pyrtlsdr** | RTL-SDR Python binding | **GPL-3.0** |
+| **librtlsdr** / `rtl-sdr` | native USB driver | **GPL-2.0-or-later** |
+
+**Copyleft note (read before distributing binaries).** `pyrtlsdr` (GPL-3.0) and
+the native `librtlsdr` (GPL) are copyleft. This repository distributes **only its
+own source** and neither bundles nor links those libraries — they are installed
+separately by the user — so the project's own `LICENSE` can be chosen
+independently. However, **distributing a *combined* or packaged/binary work** that
+includes the RTL stack (e.g. a frozen app, a wheel vendoring these libs) would
+place that combined work under the GPL. The stdlib-only GQRX path carries no such
+obligation. Keep the RTL backend an optional, separately-installed component, and
+pick the project license below with this in mind.
+
+Each dependency remains under its own license; installing them (e.g. via
+[`requirements-rtl.txt`](requirements-rtl.txt)) is your acceptance of those terms.
+
+---
+
 ## License
 
-License TBD before public release.
+License TBD before public release. See **Dependencies & licenses** above for the
+copyleft implications of the optional RTL stack when choosing it.

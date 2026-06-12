@@ -17,6 +17,7 @@ heatmap.log
 heatmap.sqlite
 heatmap.sqlite-*
 heatmap.events.jsonl
+heatmap_settings.json
 /iq/
 
 # Third-party reference material is NOT redistributed here (copyright).

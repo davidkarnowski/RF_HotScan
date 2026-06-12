@@ -55,6 +55,7 @@ DBPATH = os.path.join(APPDIR, "heatmap.sqlite")
 IQDIR = os.path.join(APPDIR, "iq")
 LOGFILE = os.path.join(APPDIR, "heatmap.log")
 EVENTS = os.path.join(APPDIR, "heatmap.events.jsonl")
+SETTINGS = os.path.join(APPDIR, "heatmap_settings.json")   # persisted GUI settings
 
 os.makedirs(APPDIR, exist_ok=True)
 
@@ -937,11 +938,12 @@ def _draw_heatmap_fig(plt, matrix, meta, colormap, dmin, dmax):
     fig, ax = plt.subplots(figsize=(11, 6))
     fig.patch.set_facecolor("#1e1e1e")
     ax.set_facecolor("#1e1e1e")
-    im = ax.imshow(matrix, aspect="auto", origin="lower", cmap=cmap,
-                   vmin=dmin, vmax=dmax, extent=[f0, f1, 0, n],
+    # origin=upper + extent top=0: first sweep (row 0) at the TOP, last at bottom.
+    im = ax.imshow(matrix, aspect="auto", origin="upper", cmap=cmap,
+                   vmin=dmin, vmax=dmax, extent=[f0, f1, n, 0],
                    interpolation="nearest")
     ax.set_xlabel("Frequency (MHz)", color="#e6e6e6")
-    ax.set_ylabel("Sweep #", color="#e6e6e6")
+    ax.set_ylabel("Sweep #  (first → last, top → bottom)", color="#e6e6e6")
     label = meta.get("label") or ""
     ax.set_title("RF activity heatmap — session %s  %s" % (meta["id"], label),
                  color="#e6e6e6")
@@ -1059,9 +1061,10 @@ class HeatmapView(tk.Frame):
         if self.buf is None:
             return
         pooled = np.maximum.reduceat(row, self.starts)
-        # scroll ring buffer up by one, newest at bottom
-        self.buf[:-1] = self.buf[1:]
-        self.buf[-1] = pooled[:self.Wd]
+        # Waterfall fills DOWNWARD: newest row at the top (index 0), older rows
+        # pushed down. (Tk's overlapping self-copy shifts cleanly, no smear.)
+        self.buf[1:] = self.buf[:-1]
+        self.buf[0] = pooled[:self.Wd]
         self.have = min(self.have + 1, self.H)
         if (self.dmin is None or self.dmax is None) and self._push_count % 12 == 0:
             self._recompute_auto()
@@ -1070,8 +1073,8 @@ class HeatmapView(tk.Frame):
         colors = self._row_colors(pooled[:self.Wd])
         try:
             self.photo.tk.call(self.photo, "copy", self.photo, "-from",
-                               0, 1, self.Wd, self.H, "-to", 0, 0)
-            self.photo.put("{" + " ".join(colors) + "}", to=(0, self.H - 1))
+                               0, 0, self.Wd, self.H - 1, "-to", 0, 1)
+            self.photo.put("{" + " ".join(colors) + "}", to=(0, 0))
         except tk.TclError:
             self._rebuild()
 
@@ -1169,6 +1172,7 @@ class HeatmapTab(tk.Frame):
 
     # ---- layout ----
     def _build(self):
+        self._ensure_styles()
         ctrl = tk.Frame(self, bg=PANEL, width=270)
         ctrl.pack(side="left", fill="y")
         ctrl.pack_propagate(False)
@@ -1181,24 +1185,72 @@ class HeatmapTab(tk.Frame):
         bottom = tk.Frame(right, bg=BG)
         bottom.pack(side="top", fill="both", expand=True, padx=4)
 
-        # detected-activity table
+        # detected-activity table (scrollable)
+        treef = tk.Frame(bottom, bg=BG)
+        treef.pack(side="left", fill="both", expand=True)
         cols = ("range", "peak", "duty")
-        self.tree = ttk.Treeview(bottom, columns=cols, show="headings", height=7)
+        self.tree = ttk.Treeview(treef, columns=cols, show="headings", height=7)
         self.tree.heading("range", text="Active range (MHz)")
         self.tree.heading("peak", text="Peak dBFS")
         self.tree.heading("duty", text="Duty %")
         self.tree.column("range", width=220)
         self.tree.column("peak", width=90, anchor="e")
         self.tree.column("duty", width=70, anchor="e")
+        tvsb = ttk.Scrollbar(treef, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tvsb.set)
+        tvsb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
 
+        # log (scrollable)
         logf = tk.Frame(bottom, bg=BG)
         logf.pack(side="left", fill="both", expand=True, padx=(6, 0))
         self.log = tk.Text(logf, height=8, bg=PANEL2, fg=FG, bd=0,
                            font=("Menlo", 9), state="disabled")
-        self.log.pack(fill="both", expand=True)
+        lvsb = ttk.Scrollbar(logf, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=lvsb.set)
+        lvsb.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
 
         self._build_controls(ctrl)
+
+    def _ensure_styles(self):
+        """Dark, readable ttk styles for this tab's buttons + comboboxes.
+        (Native macOS tk.Buttons ignore bg, rendering as unreadable light
+        buttons; ttk + the clam theme set by the Scanner respects our colors.)"""
+        st = ttk.Style()
+        try:                       # clam respects bg/fg (native Aqua ignores them)
+            if st.theme_use() != "clam":
+                st.theme_use("clam")
+        except tk.TclError:
+            pass
+        st.configure("Heat.TButton", background=PANEL2, foreground=FG,
+                     borderwidth=0, focuscolor=PANEL2, padding=6,
+                     font=("Helvetica", 10))
+        st.map("Heat.TButton",
+               background=[("active", "#454545"), ("pressed", "#454545")],
+               foreground=[("disabled", MUTED)])
+        st.configure("HeatStart.TButton", background=ACCENT, foreground="#ffffff",
+                     borderwidth=0, padding=7, font=("Helvetica", 11, "bold"))
+        st.map("HeatStart.TButton", background=[("active", "#3aa0ff")])
+        st.configure("HeatStop.TButton", background=HOT, foreground="#1a1a1a",
+                     borderwidth=0, padding=7, font=("Helvetica", 11, "bold"))
+        st.map("HeatStop.TButton", background=[("active", "#ff7a7a")])
+        # readable readonly comboboxes + their popup lists
+        st.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
+                     foreground=FG, arrowcolor=FG, bordercolor=PANEL2,
+                     lightcolor=PANEL2, darkcolor=PANEL2)
+        st.map("TCombobox",
+               fieldbackground=[("readonly", PANEL2)],
+               foreground=[("readonly", FG)],
+               background=[("readonly", PANEL2)],
+               selectbackground=[("readonly", PANEL2)],
+               selectforeground=[("readonly", FG)],
+               arrowcolor=[("readonly", FG)])
+        root = self.winfo_toplevel()
+        root.option_add("*TCombobox*Listbox.background", PANEL2)
+        root.option_add("*TCombobox*Listbox.foreground", FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
 
     def _row(self, parent, label, var, values=None, width=12):
         f = tk.Frame(parent, bg=PANEL)
@@ -1255,28 +1307,33 @@ class HeatmapTab(tk.Frame):
         self._row(p, "Color max", V["dmax"])
         self._row(p, "Label", V["label"])
 
+        # Restore last-used settings before wiring change-traces.
+        self._load_settings()
         for var in ("colormap", "dmin", "dmax"):
             V[var].trace_add("write", lambda *a: self._apply_view_opts())
+        for var in V.values():               # persist on any change
+            var.trace_add("write", lambda *a: self._save_settings())
 
         btns = tk.Frame(p, bg=PANEL)
         btns.pack(fill="x", padx=8, pady=6)
-        self.b_start = tk.Button(btns, text="▶ Start", command=self._start,
-                                 bg=ACCENT, fg="#0a0a0a", bd=0,
-                                 font=("Helvetica", 11, "bold"))
+        self.b_start = ttk.Button(btns, text="▶ Start", command=self._start,
+                                  style="HeatStart.TButton")
         self.b_start.pack(side="left", expand=True, fill="x", padx=2)
-        self.b_stop = tk.Button(btns, text="■ Stop", command=self._stop,
-                                bg=HOT, fg="#0a0a0a", bd=0,
-                                font=("Helvetica", 11, "bold"))
+        self.b_stop = ttk.Button(btns, text="■ Stop", command=self._stop,
+                                 style="HeatStop.TButton")
         self.b_stop.pack(side="left", expand=True, fill="x", padx=2)
 
         btns2 = tk.Frame(p, bg=PANEL)
         btns2.pack(fill="x", padx=8, pady=2)
-        tk.Button(btns2, text="Dump IQ", command=lambda: self.recorder.request("dump"),
-                  bg=PANEL2, fg=FG, bd=0).pack(side="left", expand=True, fill="x", padx=2)
-        tk.Button(btns2, text="Pause", command=lambda: self.recorder.request("pause"),
-                  bg=PANEL2, fg=FG, bd=0).pack(side="left", expand=True, fill="x", padx=2)
-        tk.Button(btns2, text="Resume", command=lambda: self.recorder.request("resume"),
-                  bg=PANEL2, fg=FG, bd=0).pack(side="left", expand=True, fill="x", padx=2)
+        ttk.Button(btns2, text="Dump IQ", style="Heat.TButton",
+                   command=lambda: self.recorder.request("dump")
+                   ).pack(side="left", expand=True, fill="x", padx=2)
+        ttk.Button(btns2, text="Pause", style="Heat.TButton",
+                   command=lambda: self.recorder.request("pause")
+                   ).pack(side="left", expand=True, fill="x", padx=2)
+        ttk.Button(btns2, text="Resume", style="Heat.TButton",
+                   command=lambda: self.recorder.request("resume")
+                   ).pack(side="left", expand=True, fill="x", padx=2)
 
         tk.Label(p, text="SESSIONS (re-render)", bg=PANEL, fg=FG,
                  font=("Helvetica", 11, "bold")).pack(anchor="w", padx=8, pady=(10, 2))
@@ -1286,15 +1343,42 @@ class HeatmapTab(tk.Frame):
         self.sess_combo.pack(padx=8, pady=2)
         srow = tk.Frame(p, bg=PANEL)
         srow.pack(fill="x", padx=8)
-        tk.Button(srow, text="Render (matplotlib)", command=self._render_db,
-                  bg=PANEL2, fg=FG, bd=0).pack(side="left", expand=True, fill="x", padx=2)
-        tk.Button(srow, text="Export PNG", command=self._export_png,
-                  bg=PANEL2, fg=FG, bd=0).pack(side="left", expand=True, fill="x", padx=2)
+        ttk.Button(srow, text="Render (matplotlib)", style="Heat.TButton",
+                   command=self._render_db).pack(side="left", expand=True,
+                                                 fill="x", padx=2)
+        ttk.Button(srow, text="Export PNG", style="Heat.TButton",
+                   command=self._export_png).pack(side="left", expand=True,
+                                                  fill="x", padx=2)
 
         self.status = tk.Label(p, text="IDLE", bg=PANEL, fg=MUTED, anchor="w",
                                font=("Helvetica", 10))
         self.status.pack(fill="x", padx=8, pady=(8, 4))
         self._refresh_sessions()
+
+    # ---- settings persistence ----
+    def _load_settings(self):
+        try:
+            with open(SETTINGS) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        for k, v in data.items():
+            if k in self.vars:
+                try:
+                    self.vars[k].set(v)
+                except tk.TclError:
+                    pass
+        # synthetic source is testing-only — never restore it into the GUI
+        if self.vars.get("device") and self.vars["device"].get() not in ("0", "1"):
+            self.vars["device"].set("0")
+
+    def _save_settings(self):
+        try:
+            data = {k: var.get() for k, var in self.vars.items()}
+            with open(SETTINGS, "w") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            pass
 
     # ---- actions ----
     def _build_cfg(self):
