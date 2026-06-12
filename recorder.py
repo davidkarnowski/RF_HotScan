@@ -53,10 +53,16 @@ CREATE TABLE IF NOT EXISTS recordings(
   duration_s REAL, freq_hz INTEGER, name TEXT, tag TEXT,
   samplerate INTEGER DEFAULT 48000, channels INTEGER DEFAULT 1,
   format TEXT DEFAULT 'pcm_s16le', peak_dbfs REAL, n_frames INTEGER,
-  wav_path TEXT, backend TEXT, app_version TEXT);
+  wav_path TEXT, backend TEXT, app_version TEXT,
+  transcript TEXT, transcript_engine TEXT, transcript_model TEXT,
+  transcript_rt REAL, transcribed_at REAL);
 CREATE INDEX IF NOT EXISTS ix_rec_start ON recordings(unix_start);
 CREATE INDEX IF NOT EXISTS ix_rec_freq  ON recordings(freq_hz);
 """
+
+# additive columns for DBs created before STT existed (guarded migration)
+_MIGRATE = ("transcript TEXT", "transcript_engine TEXT", "transcript_model TEXT",
+            "transcript_rt REAL", "transcribed_at REAL")
 
 _REC_COLS = ("id", "unix_start", "unix_stop", "iso_start", "iso_stop",
              "duration_s", "freq_hz", "name", "tag", "samplerate", "channels",
@@ -73,8 +79,22 @@ class RecordingsDB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        for col in _MIGRATE:                  # add transcript cols to old DBs
+            try:
+                self.conn.execute(f"ALTER TABLE recordings ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass                          # already exists
         self.conn.commit()
         self.lock = threading.Lock()
+
+    def set_transcript(self, rec_id, **fields):
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=?" for k in fields)
+        with self.lock:
+            self.conn.execute(f"UPDATE recordings SET {cols} WHERE id=?",
+                              (*fields.values(), rec_id))
+            self.conn.commit()
 
     def insert(self, m):
         with self.lock:
@@ -153,11 +173,14 @@ class WavRecorder:
     """
 
     def __init__(self, db=None, outdir=RECORD_DIR, samplerate=SAMPLERATE,
-                 log=None):
+                 log=None, on_record=None):
         self.db = db if db is not None else RecordingsDB()
         self.outdir = outdir
         self.sr = samplerate
         self.log = log or (lambda *_a, **_k: None)
+        # called with the inserted recording dict (incl. "id") after each WAV is
+        # finalized — the GUI wires this to the transcription service.
+        self.on_record = on_record
         os.makedirs(outdir, exist_ok=True)
         self._meta = {}
         self._reset()
@@ -220,6 +243,11 @@ class WavRecorder:
             pass
         _emit({"event": "recording", **m})
         self.log(f"Recorded {dur:.1f}s {m['name']} -> {os.path.basename(path)}")
+        if self.on_record is not None and m.get("id") is not None:
+            try:
+                self.on_record(m)             # -> transcription service, etc.
+            except Exception:
+                pass
 
     # ---- internals ----
     def _open_wav(self, t_unix):

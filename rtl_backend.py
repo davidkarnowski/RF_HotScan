@@ -274,6 +274,7 @@ class RtlBackend:
         self._chan_meta = {}                # current held channel (freq/name/tag)
         self._recorder = None               # lazy recorder.WavRecorder
         self._record_log = None             # GUI log callback for recordings
+        self._on_record = None              # finalized-recording hook (-> STT)
 
     SQUELCH_HYST = 2.5                       # dB hysteresis on the audio squelch gate
 
@@ -609,12 +610,20 @@ class RtlBackend:
         if on and self._recorder is None:
             import recorder
             self._recorder = recorder.WavRecorder(
-                log=self._record_log or (lambda *_a: None))
+                log=self._record_log or (lambda *_a: None),
+                on_record=self._on_record)
 
     def set_record_log(self, fn):
         self._record_log = fn
         if self._recorder is not None:
             self._recorder.log = fn
+
+    def set_on_record(self, fn):
+        """Hook fired with each finalized recording dict (GUI -> STT service).
+        Applies to the existing recorder and any created later."""
+        self._on_record = fn
+        if self._recorder is not None:
+            self._recorder.on_record = fn
 
 
 # --------------------------------------------------------------------------

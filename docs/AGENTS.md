@@ -174,6 +174,18 @@ and adds `iso` to `emit_event`; keep that convention.
   reads `RecordingsDB.list()/get()` and plays `wav_path`.
 - GQRX backend has no audio samples → no `on_hold`, no recording (control hidden).
 
+### Speech-to-text (`stt.py`, optional)
+- `SttProvider` interface (swappable engines) + `ParakeetMLXProvider` (default,
+  `mlx-community/parakeet-tdt-0.6b-v2`, RTF ~0.03, English; adapted from the
+  maintainer's SpeakNoEvil). Add a Whisper provider later by subclassing — no
+  call-site changes. `make_provider()` / `available_providers()`.
+- `TranscriptionService` — off-thread worker + bounded queue; `warm_up()` once
+  (MLX JIT). `WavRecorder.on_record(meta)` (wired by the GUI when STT is on)
+  feeds it; results go to `RecordingsDB` transcript columns + a `transcriptq`
+  the GUI drains into the chat-style **Transcripts** pane (under the LOG, RTL-only,
+  shown when the toggle is on). `pip install -r requirements-stt.txt`; toggle is
+  disabled if `parakeet_mlx`/model aren't present (`STT_AVAILABLE`).
+
 ### Heatmap (`heatmap.py`)
 A second app tab and a standalone module. It sweeps a contiguous start→stop range
 over time into a time × frequency **activity** heatmap (the 2026 `rtl_power` +

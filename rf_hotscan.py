@@ -45,6 +45,14 @@ except Exception:
     rtl_backend = None
     RTL_AVAILABLE = False
 
+# Optional local speech-to-text on recordings (parakeet-mlx). Lazy/best-effort.
+try:
+    import stt
+    STT_AVAILABLE = stt.make_provider() is not None
+except Exception:
+    stt = None
+    STT_AVAILABLE = False
+
 # The app keeps its own runtime files (log, settings, recordings) next to itself,
 # not in ~/.config/gqrx — direct SDR is the primary path. Only the bookmark file
 # stays shared with GQRX (the GQRX backend tunes the same channels); it falls
@@ -384,6 +392,7 @@ class Scanner:
             "hold_s": 3.0,
             "record": False,        # record transmissions to WAV (RTL only)
             "mute_squelch": True,   # silence the hold tail below squelch (RTL)
+            "stt_enabled": False,   # transcribe recordings (RTL + parakeet-mlx)
             "priority_interval": 6.0,
         }
         self.band_floor = {}
@@ -944,6 +953,7 @@ class ScannerGUI:
         self._backend_kind = self._initial_backend
         self._last_seen_cid = None     # last channel auto-scrolled into view
         self._spin = 0                 # scanning-activity spinner phase
+        self.stt_service = None        # lazy stt.TranscriptionService
 
         self._load_settings()
         # apply the active backend's recommended per-channel dwell
@@ -1179,6 +1189,16 @@ class ScannerGUI:
                  text="48 kHz mono WAV → ./recordings/",
                  bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
                                                                  padx=12)
+        self.var_stt = tk.BooleanVar(value=self.scanner.get_cfg("stt_enabled"))
+        cb_stt = ttk.Checkbutton(self._record_section,
+                                 text="Transcribe (Parakeet STT)",
+                                 variable=self.var_stt, command=self._apply_stt)
+        cb_stt.pack(anchor="w", padx=12, pady=(4, 0))
+        if not STT_AVAILABLE:
+            cb_stt.configure(state="disabled")
+            tk.Label(self._record_section, text="(pip install parakeet-mlx)",
+                     bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
+                                                                     padx=12)
 
     def _slider(self, parent, label, var, lo, hi, unit, cb):
         f = tk.Frame(parent, bg=PANEL)
@@ -1264,10 +1284,22 @@ class ScannerGUI:
         tk.Label(parent, text="LOG  (full detail: ./scanner.log)",
                  bg=BG, fg=MUTED, font=("Helvetica", 10, "bold")).pack(
                      anchor="w", pady=(8, 0))
-        self.log = tk.Text(parent, height=7, bg=PANEL2, fg=FG, bd=0,
+        self.log = tk.Text(parent, height=6, bg=PANEL2, fg=FG, bd=0,
                            font=("Menlo", 10), insertbackground=FG)
         self.log.pack(fill="both", expand=False)
         self.log.configure(state="disabled")
+
+        # Transcripts pane — chat/log style; shown only when STT is enabled.
+        self._txn_parent = parent
+        self._txn_label = tk.Label(parent, text="TRANSCRIPTS", bg=BG, fg=MUTED,
+                                   font=("Helvetica", 10, "bold"))
+        self.txn = tk.Text(parent, height=8, bg="#16201a", fg=FG, bd=0,
+                           font=("Menlo", 10), insertbackground=FG, wrap="word")
+        self.txn.tag_configure("tmuted", foreground=MUTED)
+        for tag, color in self.tags.items():
+            self.txn.tag_configure(tag, foreground=color)
+        self.txn.configure(state="disabled")
+        # packed/unpacked by _apply_stt
 
     # ---- tree show/hide by tag ----
     def _rebuild_tree(self):
@@ -1358,8 +1390,11 @@ class ScannerGUI:
         if rtl:
             self._record_section.pack(fill="x")
             self._apply_record()      # push current record/mute to the backend
+            self._apply_stt()         # (re)wire STT + show transcripts if enabled
         else:
             self._record_section.pack_forget()
+            if hasattr(self, "txn"):
+                self._show_transcripts(False)
 
     def _open_setup(self):
         if self._backend_kind == "rtl":
@@ -1444,6 +1479,36 @@ class ScannerGUI:
             c.set_record_log(self.scanner.log)
             c.set_record(rec)
             c.set_mute(mute)
+
+    def _apply_stt(self):
+        c = self.client
+        self.scanner.set_cfg(stt_enabled=bool(self.var_stt.get()))
+        # STT is RTL-only (it transcribes the recorder's WAVs)
+        on = bool(self.var_stt.get()) and STT_AVAILABLE and hasattr(c, "set_on_record")
+        if on:
+            if not self.var_record.get():        # STT needs recordings to exist
+                self.var_record.set(True)
+                self._apply_record()
+            rec = getattr(c, "_recorder", None)
+            if rec is None:
+                return                            # recorder not ready yet
+            if self.stt_service is None:
+                self.stt_service = stt.TranscriptionService(
+                    stt.make_provider(), rec.db, log=self.scanner.log)
+            c.set_on_record(self.stt_service.enqueue)
+            self._show_transcripts(True)
+        else:
+            if hasattr(c, "set_on_record"):
+                c.set_on_record(None)            # stop feeding; keep model warm
+            self._show_transcripts(False)
+
+    def _show_transcripts(self, show):
+        if show:
+            self._txn_label.pack(anchor="w", pady=(8, 0))
+            self.txn.pack(fill="both", expand=True)
+        else:
+            self.txn.pack_forget()
+            self._txn_label.pack_forget()
 
     # ---- RTL-SDR device setup (sample rate / ppm; reopens the dongle) ----
     def _open_sdr_setup(self):
@@ -1716,6 +1781,7 @@ class ScannerGUI:
         self._draw_meter(s, thr)
         self._update_tree(ui)
         self._drain_log()
+        self._drain_transcripts()
 
         # connection indicator dot
         connected = self.client.connected and state != "DISCONNECTED"
@@ -1845,6 +1911,29 @@ class ScannerGUI:
             self.log.see("end")
             self.log.configure(state="disabled")
 
+    def _drain_transcripts(self):
+        svc = self.stt_service
+        if svc is None:
+            return
+        got = False
+        self.txn.configure(state="normal")
+        while True:
+            try:
+                d = svc.transcriptq.get_nowait()
+            except queue.Empty:
+                break
+            got = True
+            t = (clock.local_iso(d["unix_start"])[11:19]
+                 if d.get("unix_start") else "")
+            tag = d.get("tag", "")
+            self.txn.insert("end", t + "  ", ("tmuted",))
+            self.txn.insert("end", f"{tag} {d.get('name','')}",
+                            (tag,) if tag in self.tags else ())
+            self.txn.insert("end", f'   “{d.get("text","")}”\n')
+        if got:
+            self.txn.see("end")
+        self.txn.configure(state="disabled")
+
     # ---- settings ----
     def _load_settings(self):
         try:
@@ -1854,7 +1943,8 @@ class ScannerGUI:
             return
         c = self.scanner.cfg
         for k in ("squelch_mode", "global_sql", "auto_margin", "settle_ms",
-                  "hold_s", "priority_interval", "record", "mute_squelch"):
+                  "hold_s", "priority_interval", "record", "mute_squelch",
+                  "stt_enabled"):
             if k in d:
                 c[k] = d[k]
         # clamp global squelch to the slider's range so a bad/stale value (e.g.
@@ -1878,7 +1968,7 @@ class ScannerGUI:
         c = self.scanner.cfg
         d = {k: c[k] for k in ("squelch_mode", "global_sql", "auto_margin",
                                "settle_ms", "hold_s", "priority_interval",
-                               "record", "mute_squelch")}
+                               "record", "mute_squelch", "stt_enabled")}
         d["enabled_tags"] = sorted(c["enabled_tags"])
         d["lockout"] = sorted(c["lockout"])
         d["priority_freqs"] = sorted(c["priority_freqs"])

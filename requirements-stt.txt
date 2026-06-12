@@ -1,0 +1,10 @@
+# Optional local speech-to-text for transmission recordings (stt.py).
+# Neither the GQRX scanner nor the RTL backend need this — only the
+# "Transcribe (Parakeet STT)" toggle does. macOS/Linux (Apple Silicon recommended).
+#
+#   .venv/bin/pip install -r requirements-stt.txt
+#
+# Default engine: Parakeet-TDT (mlx-community/parakeet-tdt-0.6b-v2), pulled into
+# the HuggingFace cache (~2.3 GB) on first use. The SttProvider interface in
+# stt.py lets you add Whisper backends later without touching call sites.
+parakeet-mlx>=0.5      # pulls mlx (Apple Silicon Metal) + librosa
