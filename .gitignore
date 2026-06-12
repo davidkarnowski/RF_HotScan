@@ -8,9 +8,11 @@ venv/
 # macOS
 .DS_Store
 
-# Runtime artifacts (live in ~/.config/gqrx, not the repo — listed for clarity)
+# Runtime artifacts
 scanner.log
 scanner_settings.json
+# Transmission recordings (WAVs + SQLite + JSONL) live next to the app
+/recordings/
 
 # Third-party reference material is NOT redistributed here (copyright).
 # Keep frequency-reference PDFs/exports local-only.

@@ -156,7 +156,8 @@ and adds `iso` to `emit_event`; keep that convention.
 - `recorder.py`: `WavRecorder` writes 48 kHz/16-bit mono WAVs with CLEAN CUTS —
   only `open_` blocks are written, so the WAV ends at the signal drop. Metadata
   goes to `RecordingsDB` (`recordings.sqlite`, same conventions as `HeatmapDB`) +
-  one `recordings.events.jsonl` line; WAVs live in `~/.config/gqrx/recordings/`.
+  one `recordings.events.jsonl` line; everything lives in a `recordings/` subdir
+  next to the app (`recorder.APPDIR`), not in `~/.config/gqrx`.
   Sample-accurate stop time = `start + n_frames/48000`. A future playback panel
   reads `RecordingsDB.list()/get()` and plays `wav_path`.
 - GQRX backend has no audio samples → no `on_hold`, no recording (control hidden).

@@ -22,10 +22,13 @@ import threading
 
 import clock
 
-CFGDIR = os.path.expanduser("~/.config/gqrx")
-RECORD_DIR = os.path.join(CFGDIR, "recordings")
-DB_PATH = os.path.join(CFGDIR, "recordings.sqlite")
-EVENTS = os.path.join(CFGDIR, "recordings.events.jsonl")
+# Recordings live in a "recordings/" subdir next to the app (we don't use GQRX
+# in direct mode, so ~/.config/gqrx isn't the right home). WAVs + the SQLite
+# metadata DB + the JSONL event log all go here, together.
+APPDIR = os.path.dirname(os.path.abspath(__file__))
+RECORD_DIR = os.path.join(APPDIR, "recordings")
+DB_PATH = os.path.join(RECORD_DIR, "recordings.sqlite")
+EVENTS = os.path.join(RECORD_DIR, "recordings.events.jsonl")
 APP_VERSION = "rfhotscan-rec-1.0"
 
 SAMPLERATE = 48000

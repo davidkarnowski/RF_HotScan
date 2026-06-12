@@ -1169,7 +1169,7 @@ class ScannerGUI:
                         variable=self.var_mute,
                         command=self._apply_record).pack(anchor="w", padx=12)
         tk.Label(self._record_section,
-                 text="48 kHz mono WAV → ~/.config/gqrx/recordings",
+                 text="48 kHz mono WAV → ./recordings/",
                  bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
                                                                  padx=12)
 
