@@ -99,8 +99,49 @@ remote command to read GQRX's bookmarks — RF HotScan parses the CSV file.
 - Big frequency hops (across bands) re-center the SDR hardware; `_tune` adds
   ~150 ms settle when the band index changes.
 
-## Things that are intentionally NOT done
+## Backends & RTL-SDR (multi-agent coordination)
 
-- No tone (CTCSS/DPL) squelch (protocol limitation).
-- No P25/DMR/NXDN demodulation (GQRX can't; such channels are documented only).
+There are now TWO ways the engine can talk to hardware, selected in the GUI
+(BACKEND section). **The Scanner holds `self.client` and calls a fixed set of
+methods on it; anything implementing them is a backend:**
+
+`connect/close/connected, set_mode/get_mode, set_freq/get_freq, strength,
+get_sql/set_sql, get_af/set_af, get_lna/set_lna`, optional `on_hold(freq)/
+on_resume()` (audio on park), and optional `sweep(freqs)->({freq:dbfs}, nwin)`
+(channelized fast path). `recommended_settle_ms` hints the per-channel dwell.
+
+- **`GqrxClient`** (in `rf_hotscan.py`) — the GQRX-remote backend. Stdlib only.
+- **`RtlBackend`** (in `rtl_backend.py`) — direct dongle via pyrtlsdr. Implements
+  `sweep()` (so `Scanner._sweep_pass` runs, ~62–74 ch/s) and produces audio on
+  `on_hold` via the gapless streaming `FMDemod`.
+
+**Run from the project `.venv`** (`.venv/bin/python rf_hotscan.py`) to get RTL +
+tkinter; bare `python3` runs the GQRX path only (`RTL_AVAILABLE=False`).
+
+### Shared-dongle invariant (READ if you touch RTL or heatmap)
+The RTL dongle is a **single-owner USB device.** GQRX, `RtlBackend`, and the
+**heatmap** (`heatmap.py`, `RtlSweepSource` / `RtlBackend.capture_iq`) can NOT
+own it at the same time. Rules:
+- Only one of {GQRX running, RtlBackend connected, heatmap sweeping} may hold the
+  dongle at once. Switching to RTL offers to quit GQRX (`gqrx_quit()`); a heatmap
+  range-sweep and a scanner RTL sweep must not run concurrently on the same
+  device — coordinate via a single owner.
+- **Never call `cancel_read_async()` on an idle dongle** — it corrupts the next
+  `center_freq` (LIBUSB_ERROR_IO). Guard with the `_streaming` flag.
+- Do all device access through the owner's lock; never do a synchronous
+  `read_samples` while an async reader is active.
+
+### dBFS scale convention
+`rtl_backend.channel_power_dbfs(iq, fs, offset_hz, bw)` is the ONE level measure
+used by sweep detection, per-channel reads, AND the live hold level, so a squelch
+threshold / noise floor means the same thing in all three. If you add another
+level source (e.g. the heatmap's `window_power_dbfs`), keep it on a comparable
+scale or document the offset — thresholds calibrated on one don't transfer to a
+differently-scaled one.
+
+## Things that are intentionally NOT done (GQRX backend)
+
+- No tone (CTCSS/DPL) squelch (GQRX remote-protocol limitation; the RTL backend
+  *could* add it since it owns the audio — that's a planned phase).
+- No P25/DMR/NXDN demodulation.
 - No writing to GQRX's bookmark file — RF HotScan reads it, never edits it.

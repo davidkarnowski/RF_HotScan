@@ -170,6 +170,30 @@ thread must never die silently (an earlier bug; keep this guarantee).
 
 ---
 
+## Backends (GQRX remote vs direct RTL-SDR)
+
+`Scanner.client` is a **backend** — any object implementing the method set the
+engine calls (`connect/close/connected`, `set_mode/get_mode`,
+`set_freq/get_freq`, `strength`, `get_sql/set_sql`, `get_af/set_af`,
+`get_lna/set_lna`), with optional `on_hold/on_resume` (audio on park) and
+`sweep(freqs) -> ({freq: dbfs}, nwin)` (channelized fast path). The GUI BACKEND
+selector swaps it live.
+
+- **`GqrxClient`** — GQRX over rigctl TCP (stdlib only). No `sweep`; the engine
+  uses the per-channel `_tune`+`strength` loop with the ~350 ms meter dwell.
+- **`RtlBackend`** (`rtl_backend.py`) — owns the dongle via pyrtlsdr. Provides
+  `sweep()`, so `Scanner._sweep_pass()` reads a whole sweep from a few ~2 MHz
+  captures (~62–74 ch/s). On `on_hold` it streams gapless NBFM audio
+  (`FMDemod` + sounddevice callback). Level uses `channel_power_dbfs`, the same
+  measure for sweep / per-channel reads / live hold level.
+
+The engine and GUI are otherwise backend-agnostic (~70% reuse as the spike
+predicted). See `docs/AGENTS.md` → *Backends & RTL-SDR* for the shared-dongle
+invariant (GQRX / RtlBackend / heatmap are mutually exclusive owners) and the
+`cancel_read_async`-on-idle pitfall.
+
+---
+
 ## Invariants to preserve
 
 1. **Only the engine thread performs socket I/O.** GUI → engine via
