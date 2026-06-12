@@ -384,7 +384,10 @@ class Scanner:
 
         self.ui = {"state": "STOPPED", "cur": None, "strength": -120.0,
                    "thresh": -50.0, "msg": "", "gqrx_sql": None, "af": None,
-                   "lna": None}
+                   "lna": None, "powers": {}, "sweep_n": 0, "rate": 0.0}
+        self._sweep_n = 0
+        self._rate_t0 = 0.0
+        self._rate_h0 = 0
         self.logq = queue.Queue()
         self.actions = queue.Queue()
 
@@ -586,9 +589,18 @@ class Scanner:
             self._handle_disconnect()
             return
         self._hops += len(freqs)
+        # sweep telemetry so the GUI can show live activity (channelized sweep
+        # reads every channel at once, so there's no single channel to "cycle")
+        self._sweep_n += 1
+        now = time.time()
+        if now - self._rate_t0 >= 1.0:
+            self._rate = (self._hops - self._rate_h0) / max(0.001, now - self._rate_t0)
+            self._rate_t0, self._rate_h0 = now, self._hops
         by_freq = {c["freq"]: c for c in lst}
         active = [(by_freq[f], p) for f, p in powers.items()
                   if f in by_freq and p >= self.effective_threshold(f)]
+        self._set_ui(powers=dict(powers), sweep_n=self._sweep_n,
+                     rate=getattr(self, "_rate", 0.0))
         logger.debug("SWEEP %d ch / %d windows  active=%d  max=%.1f dBFS",
                      len(freqs), nwin, len(active),
                      max(powers.values()) if powers else -200)
@@ -923,6 +935,8 @@ class ScannerGUI:
         self._save_counter = 0        # autosave throttle (refresh ticks)
         self._last_saved = ""         # last-persisted settings snapshot (json)
         self._backend_kind = self._initial_backend
+        self._last_seen_cid = None     # last channel auto-scrolled into view
+        self._spin = 0                 # scanning-activity spinner phase
 
         self._load_settings()
         # apply the active backend's recommended per-channel dwell
@@ -1202,13 +1216,14 @@ class ScannerGUI:
     def _build_channel_list(self, parent):
         wrap = tk.Frame(parent, bg=BG)
         wrap.pack(fill="both", expand=True)
-        cols = ("on", "prio", "freq", "name", "tag", "status", "last")
+        cols = ("on", "prio", "freq", "name", "tag", "lvl", "status", "last")
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=12)
         tsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tsb.set)
         layout = (("on", 36, "On"), ("prio", 34, "★"), ("freq", 95, "Freq MHz"),
-                  ("name", 290, "Channel"), ("tag", 70, "Tag"),
-                  ("status", 80, "Status"), ("last", 90, "Last active"))
+                  ("name", 260, "Channel"), ("tag", 64, "Tag"),
+                  ("lvl", 64, "Lvl dBFS"), ("status", 70, "Status"),
+                  ("last", 82, "Last active"))
         for c, w, txt in layout:
             self.tree.heading(c, text=txt)
             self.tree.column(c, width=w,
@@ -1218,6 +1233,7 @@ class ScannerGUI:
             self.tree.tag_configure(tag, foreground=color)
         self.tree.tag_configure("locked", foreground=MUTED)
         self.tree.tag_configure("disabled", foreground="#5a5a5a")
+        self.tree.tag_configure("active", background="#1c3a26")   # live signal row
         tsb.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Button-1>", self._on_tree_click)
@@ -1228,7 +1244,7 @@ class ScannerGUI:
                                                          "units"), "break")[1])
         for c in sorted(self.chans, key=lambda c: c["freq"]):
             iid = self.tree.insert("", "end", values=(
-                "☑", "", f"{c['freq']/1e6:.4f}", c["name"], c["tag"], "", ""),
+                "☑", "", f"{c['freq']/1e6:.4f}", c["name"], c["tag"], "", "", ""),
                 tags=(c["tag"],))
             self.tree_iid[c["cid"]] = iid
             self.iid_cid[iid] = c["cid"]
@@ -1652,7 +1668,19 @@ class ScannerGUI:
         calibrating = (state == "CALIBRATING")
         statecolor = {"SCANNING": ACCENT, "HOLDING": ACTIVE, "STOPPED": MUTED,
                       "DISCONNECTED": HOT, "CALIBRATING": GOLD}.get(state, FG)
-        self.lbl_state.config(text=state, fg=statecolor)
+        # Animated activity indicator: the channelized sweep reads all channels
+        # at once, so instead of a cycling channel name we show a live spinner +
+        # sweep rate to make "it's working" unambiguous.
+        if state == "SCANNING" and self.scanner.run.is_set():
+            self._spin = (self._spin + 1) % 4
+            spinner = "◐◓◑◒"[self._spin]
+            rate = ui.get("rate", 0.0)
+            label = f"{spinner} SCANNING"
+            if rate:
+                label += f"  ·  {rate:.0f} ch/s"
+            self.lbl_state.config(text=label, fg=statecolor)
+        else:
+            self.lbl_state.config(text=state, fg=statecolor)
         if calibrating:
             self.tag_chip.config(text=" CALIBRATING ", bg=GOLD,
                                  fg=contrast_fg(GOLD))
@@ -1675,7 +1703,7 @@ class ScannerGUI:
                 self.lbl_freq.config(text="—  MHz")
         self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {thr:.0f})")
         self._draw_meter(s, thr)
-        self._update_tree(cur)
+        self._update_tree(ui)
         self._drain_log()
 
         # connection indicator dot
@@ -1737,7 +1765,10 @@ class ScannerGUI:
             c.create_text(x(db) + 2, 8, text=f"{db}", anchor="w", fill=MUTED,
                           font=("Menlo", 8))
 
-    def _update_tree(self, cur):
+    def _update_tree(self, ui):
+        cur = ui.get("cur")
+        state = ui.get("state")
+        powers = ui.get("powers") or {}
         lk = self.scanner.get_cfg("lockout")
         pf = self.scanner.get_cfg("priority_freqs")
         dis = self.scanner.get_cfg("disabled_cids")
@@ -1751,20 +1782,38 @@ class ScannerGUI:
             laststr = f"{int(now - last)}s ago" if last else ""
             star = "★" if c["freq"] in pf else ""
             on = "☐" if off else "☑"
+            # live level from the latest sweep (RTL); blank for GQRX per-channel
+            p = powers.get(c["freq"])
+            lvl = f"{p:.0f}" if p is not None else ""
+            is_active = (p is not None and not off
+                         and p >= self.scanner.effective_threshold(c["freq"]))
             status = "OFF" if off else ("LOCKED" if locked else "")
-            row_tag = ("disabled",) if off else (
-                ("locked",) if locked else (c["tag"],))
+            if off:
+                row_tag = ("disabled",)
+            elif is_active:
+                row_tag = ("active", c["tag"])      # bg highlight + tag-colored text
+            elif locked:
+                row_tag = ("locked",)
+            else:
+                row_tag = (c["tag"],)
             self.tree.item(iid, values=(on, star, f"{c['freq']/1e6:.4f}",
-                                        c["name"], c["tag"], status, laststr),
+                                        c["name"], c["tag"], lvl, status, laststr),
                            tags=row_tag)
-        if cur:
-            iid = self.tree_iid.get(cur["cid"])
-            if iid and self.tree.exists(iid):
-                try:
-                    self.tree.selection_set(iid)
-                    self.tree.see(iid)
-                except tk.TclError:
-                    pass
+        # Auto-scroll the list ONLY when the held channel changes — never on every
+        # refresh (that fought manual scrolling and jittered the view).
+        if state == "HOLDING" and cur:
+            cid = cur["cid"]
+            if cid != self._last_seen_cid:
+                self._last_seen_cid = cid
+                iid = self.tree_iid.get(cid)
+                if iid and self.tree.exists(iid):
+                    try:
+                        self.tree.selection_set(iid)
+                        self.tree.see(iid)
+                    except tk.TclError:
+                        pass
+        else:
+            self._last_seen_cid = None
 
     def _drain_log(self):
         lines = []

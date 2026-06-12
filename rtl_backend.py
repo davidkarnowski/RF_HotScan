@@ -152,7 +152,7 @@ class FMDemod:
         self.last_power_dbfs = -120.0
         self._agc = 1.0
 
-    def process(self, iq):
+    def process(self, iq, adapt=True):
         n = len(iq)
         # continuous NCO: phase carries across blocks (no boundary click)
         inc = -2.0 * np.pi * self.off / self.fs
@@ -180,14 +180,23 @@ class FMDemod:
         d, self.za = signal.lfilter(self.ta, 1.0, d, zi=self.za)
         # --- audio AGC: drive RMS toward a target so loudness is consistent
         # regardless of how hard the signal is deviating (this is what GQRX does
-        # and why it sounded fuller). Fast attack, slow release.
-        rms = float(np.sqrt(np.mean(d * d))) + 1e-9
-        want = min(self.agc_max, self.agc_target / rms)
-        coef = 0.5 if want < self._agc else 0.05      # attack vs release
-        self._agc += coef * (want - self._agc)
+        # and why it sounded fuller). Fast attack, slow release, and FROZEN while
+        # squelched (`adapt=False`) so it doesn't pump noise up between/after
+        # transmissions ("breathing"). The gain is RAMPED across the block from
+        # the previous value so there is no zipper click at block boundaries.
+        prev = self._agc
+        if adapt:
+            rms = float(np.sqrt(np.mean(d * d))) + 1e-9
+            want = min(self.agc_max, self.agc_target / rms)
+            coef = 0.5 if want < prev else 0.03       # fast attack, slow release
+            new = prev + coef * (want - prev)
+        else:
+            new = prev                                # hold gain while squelched
+        ramp = np.linspace(prev, new, d.size, dtype=np.float64) if d.size else 1.0
+        self._agc = new
         # tanh soft-limiter instead of a hard clip, so raising volume saturates
         # smoothly rather than blowing out.
-        return np.tanh(d * self._agc * self.volume).astype(np.float32)
+        return np.tanh(d * ramp * self.volume).astype(np.float32)
 
 
 class RtlBackend:
@@ -339,6 +348,7 @@ class RtlBackend:
         aq = _queue.Queue(maxsize=32)                # ~0.7 s of audio max
         self._audio_stop.clear()
         lead = {"buf": np.zeros(0, dtype=np.float32)}
+        menv = [1.0]                                 # mute envelope (0..1), fades transitions
 
         def iq_cb(samples, _ctx):
             if self._audio_stop.is_set():
@@ -348,24 +358,32 @@ class RtlBackend:
                     pass
                 return
             try:
-                audio = demod.process(samples)
-                # live level on the SAME scale as sweep/measure (so hold-loss
-                # uses the same threshold as detection)
+                # Squelch decision FIRST (from raw IQ power, independent of the
+                # demod) so the AGC can freeze while squelched instead of pumping
+                # the noise up — the main source of "breathing".
                 self._live_power = channel_power_dbfs(
                     samples, self.sample_rate, channel_hz - center,
                     self.channel_bw)
-                self._audio_live = True
-                # squelch gate: is the signal above the channel threshold?
                 open_ = self._live_power >= (self._threshold - self.SQUELCH_HYST)
+                audio = demod.process(samples, adapt=open_)
+                self._audio_live = True
                 # record the UN-muted audio (only open blocks get written, so the
-                # WAV ends at the signal drop), then mute the hold tail for output
+                # WAV ends at the signal drop)
                 if self._recorder is not None and self.record_enabled:
                     try:
                         self._recorder.feed(audio, open_, clock.now_unix())
                     except Exception:
                         pass
-                out = audio if (open_ or not self.mute_squelch) \
-                    else np.zeros_like(audio)
+                # Smooth mute: ramp the envelope across the block on squelch
+                # transitions so open<->closed doesn't click.
+                target = 1.0 if (open_ or not self.mute_squelch) else 0.0
+                if audio.size:
+                    env = np.linspace(menv[0], target, audio.size,
+                                      dtype=np.float32)
+                    out = audio * env
+                else:
+                    out = audio
+                menv[0] = target
                 aq.put_nowait(out)
             except _queue.Full:
                 pass                                  # output not draining; skip
