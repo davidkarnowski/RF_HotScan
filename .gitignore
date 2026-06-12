@@ -1,3 +1,8 @@
+# Secrets — NEVER commit. API keys (OpenAI, HuggingFace, …) live here.
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -28,3 +33,6 @@ reference/
 
 # Local-only development notes, screenshots and progress log (maintainer/agents)
 /dev/
+
+# Locally-downloaded STT model weights (not redistributed)
+.models/

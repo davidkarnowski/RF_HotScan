@@ -257,7 +257,16 @@ class RtlBackend:
         self._streaming = threading.Event()   # set while the async reader owns the device
         # --- engine-facing (Backend interface, mirrors GqrxClient) state ---
         self.recommended_settle_ms = 30     # RTL retunes fast; no GQRX meter lag
-        self.channel_bw = 10000
+        # CANONICAL DETECTION BANDWIDTH — used for EVERY power measurement (the
+        # noise-floor sampling, the sweep, the per-channel level read, and the
+        # live hold/squelch level). It is kept FIXED (set_mode does NOT change it)
+        # so a dBFS level / squelch threshold means the same thing everywhere and
+        # the per-band noise floor stays comparable to live levels. ~12.5 kHz
+        # captures NBFM voice energy while keeping the noise bandwidth steady.
+        # (Audio quality is unaffected: FMDemod uses its own fixed channel filter,
+        #  not channel_bw.)
+        self.channel_bw = 12500
+        self.demod_bw = 12500               # requested demod bw (informational only)
         self.strength_nsamp = 32768         # ~14 ms capture for a level read
         self.volume_db = 0.0
         self._cur_freq = 462_000_000
@@ -275,6 +284,8 @@ class RtlBackend:
         self._recorder = None               # lazy recorder.WavRecorder
         self._record_log = None             # GUI log callback for recordings
         self._on_record = None              # finalized-recording hook (-> STT)
+        self._on_start = None               # signal-onset hook (-> live UI line)
+        self._on_discard = None             # blip-discarded hook (-> drop UI line)
 
     SQUELCH_HYST = 2.5                       # dB hysteresis on the audio squelch gate
 
@@ -461,9 +472,19 @@ class RtlBackend:
         # racing the engine's sync level-reads. The output stream's callback
         # drains the ring buffer independently.
         self._streaming.set()
+        # Follow the OS default output device. PortAudio reads CoreAudio's
+        # default device once at init and does NOT track later changes (plugging
+        # in headphones, switching output in System Settings), so re-initialize
+        # it here — each new transmission then opens on the *current* default.
+        # device=None explicitly means "the default device" (we never pin one).
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
         stream = sd.OutputStream(samplerate=self.AUDIO_RATE, channels=1,
                                  dtype="float32", blocksize=1024, latency="high",
-                                 callback=audio_cb)
+                                 device=None, callback=audio_cb)
         stream.start()
         try:
             self.sdr.read_samples_async(iq_cb, self.IQ_BLOCK)   # blocks until cancel
@@ -514,10 +535,14 @@ class RtlBackend:
     # parked (on_hold), level comes from the live audio demod so we don't fight
     # the dongle with a second capture.
     def set_mode(self, mode, bw):
-        self.channel_bw = int(bw) or self.channel_bw
+        # Record the requested per-channel bandwidth but do NOT let it change the
+        # detection bandwidth — channel_bw must stay fixed so the noise floor and
+        # all live levels remain on one comparable dBFS scale (see __init__).
+        # Audio is demodulated by FMDemod's own fixed filters regardless.
+        self.demod_bw = int(bw) or self.demod_bw
 
     def get_mode(self):
-        return "FM", str(self.channel_bw)
+        return "FM", str(self.demod_bw)
 
     def set_freq(self, hz):
         self._cur_freq = int(hz)
@@ -611,7 +636,8 @@ class RtlBackend:
             import recorder
             self._recorder = recorder.WavRecorder(
                 log=self._record_log or (lambda *_a: None),
-                on_record=self._on_record)
+                on_record=self._on_record, on_start=self._on_start)
+            self._recorder.on_discard = self._on_discard
 
     def set_record_log(self, fn):
         self._record_log = fn
@@ -624,6 +650,20 @@ class RtlBackend:
         self._on_record = fn
         if self._recorder is not None:
             self._recorder.on_record = fn
+
+    def set_on_start(self, fn):
+        """Hook fired at signal onset with {wav_path,name,tag,freq_hz,unix_start,
+        iso_start} so the GUI can list the transmission live."""
+        self._on_start = fn
+        if self._recorder is not None:
+            self._recorder.on_start = fn
+
+    def set_on_discard(self, fn):
+        """Hook fired with the wav_path when a started transmission is discarded
+        as a blip, so the GUI can drop the live line it already showed."""
+        self._on_discard = fn
+        if self._recorder is not None:
+            self._recorder.on_discard = fn
 
 
 # --------------------------------------------------------------------------

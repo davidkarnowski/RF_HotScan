@@ -53,6 +53,12 @@ except Exception:
     stt = None
     STT_AVAILABLE = False
 
+# Transmission playback (stdlib + lazy sounddevice). Independent of the SDR.
+try:
+    import player
+except Exception:
+    player = None
+
 # The app keeps its own runtime files (log, settings, recordings) next to itself,
 # not in ~/.config/gqrx — direct SDR is the primary path. Only the bookmark file
 # stays shared with GQRX (the GQRX backend tunes the same channels); it falls
@@ -392,7 +398,9 @@ class Scanner:
             "hold_s": 3.0,
             "record": False,        # record transmissions to WAV (RTL only)
             "mute_squelch": True,   # silence the hold tail below squelch (RTL)
-            "stt_enabled": False,   # transcribe recordings (RTL + parakeet-mlx)
+            "stt_enabled": False,   # transcribe recordings (RTL only)
+            "stt_engine": "auto",   # provider name: parakeet-mlx | whisper-mlx | openai
+            "stt_model": "",        # provider-specific model id ("" = provider default)
             "priority_interval": 6.0,
         }
         self.band_floor = {}
@@ -868,7 +876,14 @@ class Scanner:
                      msg="Auto-Noise-Floor: starting…")
         results = {}
         nbands = len(self.bands)
-        guard, step, max_samples = 15_000, 25_000, 15
+        guard, step, max_samples = 15_000, 25_000, 20
+        # Measure every band in ONE fixed mode/bandwidth so the per-band floors
+        # are on the same dBFS scale (the RTL backend ignores this bw for
+        # detection — it uses its fixed channel_bw — but GQRX needs a set mode).
+        self.client.set_mode("FM", 10000)
+        # RTL retunes in ~30 ms; GQRX's meter needs ~350 ms. Use the backend's own
+        # recommendation so calibration is fast on RTL and accurate on GQRX.
+        settle = max(0.03, getattr(self.client, "recommended_settle_ms", 350) / 1000.0)
         for bi, (lo, hi) in enumerate(self.bands):
             cands = []
             f = lo - 100_000
@@ -877,6 +892,8 @@ class Scanner:
                     cands.append(f)
                 f += step
             if not cands:
+                self.log(f"  Band {lo/1e6:.3f}-{hi/1e6:.3f} MHz: no clear "
+                         "frequencies to sample — skipped")
                 continue
             if len(cands) > max_samples:
                 k = len(cands) / max_samples
@@ -885,9 +902,8 @@ class Scanner:
             for j, f in enumerate(cands):
                 if not self.alive:
                     return
-                self.client.set_mode("FM", 10000)
                 self.client.set_freq(f)
-                time.sleep(self.get_cfg("settle_ms") / 1000.0 + 0.03)
+                time.sleep(settle)
                 sig = self.client.strength()
                 samples.append(sig)
                 # live visual: move the meter + banner as we sample
@@ -899,8 +915,11 @@ class Scanner:
                 samples.sort()
                 median = samples[len(samples) // 2]
                 results[bi] = median
-                self.log(f"  Band {lo/1e6:.3f}-{hi/1e6:.3f} MHz: "
-                         f"floor ~{median:.1f} dBFS ({len(samples)} samples)")
+                # show the spread so a band measuring poorly (e.g. a strong signal
+                # leaking in -> wide spread) is visible at a glance
+                self.log(f"  Band {lo/1e6:.3f}-{hi/1e6:.3f} MHz: floor "
+                         f"{median:.1f} dBFS  (min {samples[0]:.1f} / max "
+                         f"{samples[-1]:.1f}, {len(samples)} samples)")
         with self.lock:
             self.band_floor = results
         margin = self.get_cfg("auto_margin")
@@ -954,6 +973,12 @@ class ScannerGUI:
         self._last_seen_cid = None     # last channel auto-scrolled into view
         self._spin = 0                 # scanning-activity spinner phase
         self.stt_service = None        # lazy stt.TranscriptionService
+        self.txnq = queue.Queue()      # transmission lifecycle events (start/stop)
+        self._txn_items = {}           # wav_path -> transmission record (live UI)
+        self._txn_order = []           # insertion order of wav_path keys
+        self.player = player.WavPlayer(log=self.scanner.log) if player else None
+        self._play_path = None         # wav_path of the selected/playing recording
+        self._last_play_state = "stopped"
 
         self._load_settings()
         # apply the active backend's recommended per-channel dwell
@@ -1191,12 +1216,34 @@ class ScannerGUI:
                                                                  padx=12)
         self.var_stt = tk.BooleanVar(value=self.scanner.get_cfg("stt_enabled"))
         cb_stt = ttk.Checkbutton(self._record_section,
-                                 text="Transcribe (Parakeet STT)",
+                                 text="Transcribe recordings",
                                  variable=self.var_stt, command=self._apply_stt)
         cb_stt.pack(anchor="w", padx=12, pady=(4, 0))
+        # Engine/model picker — local (Parakeet / Whisper) + cloud (OpenAI).
+        # Only engines whose deps + model/credentials are present are listed.
+        self._stt_opts = stt.engine_options() if stt else []
+        self.var_stt_engine = tk.StringVar()
+        if self._stt_opts:
+            saved_e = self.scanner.get_cfg("stt_engine")
+            saved_m = self.scanner.get_cfg("stt_model") or ""
+            cur = next((o for o in self._stt_opts
+                        if o["engine"] == saved_e
+                        and (o["model"] or "") == saved_m), self._stt_opts[0])
+            self.var_stt_engine.set(cur["label"])
+            row = tk.Frame(self._record_section, bg=PANEL)
+            row.pack(fill="x", padx=12, pady=(2, 0))
+            tk.Label(row, text="Model:", bg=PANEL, fg=MUTED,
+                     font=("Helvetica", 9)).pack(side="left")
+            self._stt_combo = ttk.Combobox(
+                row, textvariable=self.var_stt_engine, state="readonly",
+                values=[o["label"] for o in self._stt_opts], width=26,
+                font=("Helvetica", 9))
+            self._stt_combo.pack(side="left", padx=(4, 0))
+            self._stt_combo.bind("<<ComboboxSelected>>", self._apply_stt_engine)
         if not STT_AVAILABLE:
             cb_stt.configure(state="disabled")
-            tk.Label(self._record_section, text="(pip install parakeet-mlx)",
+            tk.Label(self._record_section,
+                     text="(pip install -r requirements-stt.txt)",
                      bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
                                                                      padx=12)
 
@@ -1211,11 +1258,18 @@ class ScannerGUI:
                        font=("Helvetica", 10, "bold"))
         val.pack(side="right")
 
-        def on_move(_=None):
-            val.config(text=f"{var.get():.0f} {unit}")
-            cb()
+        # Keep the numeric readout in sync via a trace on the variable: this fires
+        # on user drag AND on programmatic var.set() (e.g. GQRX squelch sync),
+        # whereas the Scale's `command` only fires on user interaction. That gap
+        # was why the global-squelch number could stop tracking the slider.
+        def _show(*_):
+            try:
+                val.config(text=f"{var.get():.0f} {unit}")
+            except tk.TclError:
+                pass
+        var.trace_add("write", _show)
         ttk.Scale(f, from_=lo, to=hi, variable=var, orient="horizontal",
-                  command=on_move).pack(fill="x")
+                  command=lambda _=None: cb()).pack(fill="x")
         return f, val
 
     def _build_taglist(self, parent):
@@ -1293,13 +1347,49 @@ class ScannerGUI:
         self._txn_parent = parent
         self._txn_label = tk.Label(parent, text="TRANSCRIPTS", bg=BG, fg=MUTED,
                                    font=("Helvetica", 10, "bold"))
+        # cursor="arrow" (not the text I-beam): rows behave like list items, each
+        # with its own embedded ▶ play button. Click a row to select it.
         self.txn = tk.Text(parent, height=8, bg="#16201a", fg=FG, bd=0,
-                           font=("Menlo", 10), insertbackground=FG, wrap="word")
+                           font=("Menlo", 10), insertbackground=FG, wrap="word",
+                           cursor="arrow")
         self.txn.tag_configure("tmuted", foreground=MUTED)
+        self.txn.tag_configure("tlive", foreground="#ff5d5d")   # recording now
+        self.txn.tag_configure("terr", foreground="#ff7b7b")    # STT error
+        self.txn.tag_configure("tsel", background="#23323a")    # selected row
+        self.txn.tag_configure("tplaying", background="#243a30")  # now playing
         for tag, color in self.tags.items():
             self.txn.tag_configure(tag, foreground=color)
         self.txn.configure(state="disabled")
-        # packed/unpacked by _apply_stt
+        self.txn.bind("<Button-1>", self._on_txn_click)   # click a row to select
+        self._txn_btns = []          # embedded per-row play buttons (recreated on rerender)
+        self._txn_line_keys = []     # text line number -> wav_path
+        self._txn_selected = None    # wav_path of the selected row
+
+        # transport bar — controls the selected recording. Appears only once a
+        # row is selected. Built from label-buttons because tk.Button ignores
+        # bg/fg on macOS aqua (light glyphs would vanish on the native button).
+        self._txn_transport = tk.Frame(parent, bg=BG)
+        self._btn_play = self._mk_btn(self._txn_transport, "▶  Play",
+                                      self._toggle_play, fg=ACTIVE)
+        self._btn_play.pack(side="left")
+        self._btn_stop = self._mk_btn(self._txn_transport, "⏹  Stop",
+                                      self._stop_play, fg=HOT)
+        self._btn_stop.pack(side="left", padx=(6, 8))
+        self._play_lbl = tk.Label(self._txn_transport, text="", bg=BG, fg=MUTED,
+                                  font=("Helvetica", 9))
+        self._play_lbl.pack(side="left")
+        # packed/unpacked by _apply_stt (with the transcripts pane)
+
+    def _mk_btn(self, parent, text, cmd, fg=FG, bg=PANEL2):
+        """A readable clickable 'button' built from a Label. tk.Button ignores
+        bg/fg on macOS aqua, so we use a Label (as the tag buttons do) with a
+        hover effect — guarantees the glyph/label is legible on a dark button."""
+        b = tk.Label(parent, text=text, bg=bg, fg=fg,
+                     font=("Helvetica", 10, "bold"), padx=9, pady=3, cursor="hand2")
+        b.bind("<Button-1>", lambda e: cmd())
+        b.bind("<Enter>", lambda e: b.config(bg=PANEL))
+        b.bind("<Leave>", lambda e: b.config(bg=bg))
+        return b
 
     # ---- tree show/hide by tag ----
     def _rebuild_tree(self):
@@ -1480,6 +1570,15 @@ class ScannerGUI:
             c.set_record(rec)
             c.set_mute(mute)
 
+    def _selected_engine_model(self):
+        """Resolve the model dropdown to (engine_name, model_id|None)."""
+        lbl = self.var_stt_engine.get() if hasattr(self, "var_stt_engine") else ""
+        for o in getattr(self, "_stt_opts", []):
+            if o["label"] == lbl:
+                return o["engine"], o["model"]
+        return (self.scanner.get_cfg("stt_engine") or "auto",
+                self.scanner.get_cfg("stt_model") or None)
+
     def _apply_stt(self):
         c = self.client
         self.scanner.set_cfg(stt_enabled=bool(self.var_stt.get()))
@@ -1493,22 +1592,142 @@ class ScannerGUI:
             if rec is None:
                 return                            # recorder not ready yet
             if self.stt_service is None:
+                eng, model = self._selected_engine_model()
+                prov = stt.make_provider(eng, model) or stt.make_provider()
+                if prov is None:
+                    self.scanner.log("STT: no usable engine")
+                    self.var_stt.set(False)
+                    return
+                self.scanner.set_cfg(stt_engine=prov.name, stt_model=model or "")
                 self.stt_service = stt.TranscriptionService(
-                    stt.make_provider(), rec.db, log=self.scanner.log)
-            c.set_on_record(self.stt_service.enqueue)
+                    prov, rec.db, log=self.scanner.log)
+            # feed finalized recordings to STT AND list transmissions live
+            c.set_on_record(self._on_recording_done)
+            if hasattr(c, "set_on_start"):
+                c.set_on_start(self._on_recording_started)
+            if hasattr(c, "set_on_discard"):
+                c.set_on_discard(self._on_recording_discarded)
             self._show_transcripts(True)
         else:
             if hasattr(c, "set_on_record"):
                 c.set_on_record(None)            # stop feeding; keep model warm
+            if hasattr(c, "set_on_start"):
+                c.set_on_start(None)
+            if hasattr(c, "set_on_discard"):
+                c.set_on_discard(None)
             self._show_transcripts(False)
+
+    def _apply_stt_engine(self, _=None):
+        """Model dropdown changed — persist and rebuild a running service."""
+        eng, model = self._selected_engine_model()
+        self.scanner.set_cfg(stt_engine=eng, stt_model=model or "")
+        if self.stt_service is not None:
+            self.stt_service.stop()
+            self.stt_service = None
+            self.scanner.log(f"STT engine → {self.var_stt_engine.get()}")
+            if bool(self.var_stt.get()):
+                self._apply_stt()                 # rebuild with the new engine
+
+    # ---- live transmission listing (recorder thread -> txnq -> UI) ----
+    def _on_recording_started(self, m):
+        self.txnq.put({"kind": "start", "key": m.get("wav_path"),
+                       "name": m.get("name", ""), "tag": m.get("tag", ""),
+                       "unix_start": m.get("unix_start")})
+
+    def _on_recording_done(self, m):
+        self.txnq.put({"kind": "stop", "key": m.get("wav_path"),
+                       "unix_start": m.get("unix_start"),
+                       "unix_stop": m.get("unix_stop"),
+                       "duration_s": m.get("duration_s"),
+                       "name": m.get("name", ""), "tag": m.get("tag", "")})
+        svc = self.stt_service
+        if svc is not None:
+            svc.enqueue(m)
+
+    def _on_recording_discarded(self, wav_path):
+        self.txnq.put({"kind": "discard", "key": wav_path})
+
+    # ---- playback transport ----
+    def _on_txn_click(self, event):
+        """Click anywhere on a row to SELECT it (highlight + reveal transport).
+        Playing is via each row's own ▶ button (see _txn_rerender / _play_key)."""
+        if not self.player:
+            return
+        line = int(self.txn.index(f"@{event.x},{event.y}").split(".")[0])
+        if not (1 <= line <= len(self._txn_line_keys)):
+            return
+        self._txn_selected = self._txn_line_keys[line - 1]
+        if not self._txn_transport.winfo_ismapped():
+            self._txn_transport.pack(fill="x", pady=(2, 0))
+        self._update_play_ui()
+        self._txn_rerender()                     # repaint selection highlight
+
+    def _play_key(self, key):
+        """Play a specific recording (its per-row ▶ button)."""
+        if not self.player:
+            return
+        it = self._txn_items.get(key)
+        if not it or not it.get("unix_stop"):
+            self.scanner.log("Recording still in progress — can't play yet")
+            return
+        if not os.path.exists(key):
+            self.scanner.log("Recording file not found")
+            return
+        self._txn_selected = self._play_path = key
+        self.player.play(key)
+        if not self._txn_transport.winfo_ismapped():
+            self._txn_transport.pack(fill="x", pady=(2, 0))
+        self._update_play_ui()
+        self._txn_rerender()
+
+    def _toggle_play(self):
+        if not self.player:
+            return
+        st = self.player.state
+        if st in ("playing", "paused"):
+            self.player.pause()
+        else:                                    # play the selected row
+            key = self._txn_selected or self._play_path
+            if key and os.path.exists(key):
+                self._play_path = key
+                self.player.play(key)
+        self._update_play_ui()
+
+    def _stop_play(self):
+        if self.player:
+            self.player.stop()
+        self._update_play_ui()
+
+    def _update_play_ui(self):
+        if not hasattr(self, "_btn_play") or not self.player:
+            return
+        st = self.player.state
+        self._btn_play.config(text="⏸  Pause" if st == "playing"
+                              else ("▶  Resume" if st == "paused" else "▶  Play"))
+        it = self._txn_items.get(self._txn_selected or self._play_path)
+        if it is None:
+            self._play_lbl.config(text="")
+        else:
+            tag = it.get("tag", "")
+            name = (tag + " " if tag else "") + (it.get("name", "") or "")
+            dot = {"playing": "▶", "paused": "⏸"}.get(st, "○")
+            self._play_lbl.config(text=f"  {dot} {name}")
+        if st != self._last_play_state:          # repaint the now-playing highlight
+            self._last_play_state = st
+            self._txn_rerender()
 
     def _show_transcripts(self, show):
         if show:
             self._txn_label.pack(anchor="w", pady=(8, 0))
             self.txn.pack(fill="both", expand=True)
+            if self._txn_selected is not None:   # transport appears once a row is picked
+                self._txn_transport.pack(fill="x", pady=(2, 0))
         else:
+            self._txn_transport.pack_forget()
             self.txn.pack_forget()
             self._txn_label.pack_forget()
+            if self.player:
+                self.player.stop()
 
     # ---- RTL-SDR device setup (sample rate / ppm; reopens the dongle) ----
     def _open_sdr_setup(self):
@@ -1782,6 +2001,7 @@ class ScannerGUI:
         self._update_tree(ui)
         self._drain_log()
         self._drain_transcripts()
+        self._update_play_ui()
 
         # connection indicator dot
         connected = self.client.connected and state != "DISCONNECTED"
@@ -1912,27 +2132,165 @@ class ScannerGUI:
             self.log.configure(state="disabled")
 
     def _drain_transcripts(self):
-        svc = self.stt_service
-        if svc is None:
-            return
-        got = False
-        self.txn.configure(state="normal")
-        while True:
+        changed = False
+        while True:                              # recorder start/stop events
             try:
-                d = svc.transcriptq.get_nowait()
+                ev = self.txnq.get_nowait()
             except queue.Empty:
                 break
-            got = True
-            t = (clock.local_iso(d["unix_start"])[11:19]
-                 if d.get("unix_start") else "")
-            tag = d.get("tag", "")
-            self.txn.insert("end", t + "  ", ("tmuted",))
-            self.txn.insert("end", f"{tag} {d.get('name','')}",
-                            (tag,) if tag in self.tags else ())
-            self.txn.insert("end", f'   “{d.get("text","")}”\n')
-        if got:
-            self.txn.see("end")
+            self._txn_apply(ev)
+            changed = True
+        svc = self.stt_service
+        if svc is not None:                      # STT text/no-speech/error events
+            while True:
+                try:
+                    ev = svc.transcriptq.get_nowait()
+                except queue.Empty:
+                    break
+                self._txn_apply(ev)
+                changed = True
+        if changed:
+            self._txn_rerender()
+        self._update_stt_status()
+
+    def _txn_apply(self, ev):
+        """Merge one lifecycle event into the per-transmission record, keyed by
+        wav_path. start -> stop -> text arrive over the life of one transmission."""
+        key = ev.get("key")
+        if not key:
+            return
+        if ev.get("kind") == "discard":           # blip removed from disk
+            self._txn_items.pop(key, None)
+            if key in self._txn_order:
+                self._txn_order.remove(key)
+            return
+        it = self._txn_items.get(key)
+        if it is None:
+            it = {"key": key}
+            self._txn_items[key] = it
+            self._txn_order.append(key)
+        kind = ev.get("kind")
+        if kind == "start":
+            it.update(unix_start=ev.get("unix_start"), name=ev.get("name", ""),
+                      tag=ev.get("tag", ""), live=True)
+        elif kind == "stop":
+            it.update(unix_stop=ev.get("unix_stop"),
+                      duration_s=ev.get("duration_s"), live=False)
+            if it.get("unix_start") is None:
+                it["unix_start"] = ev.get("unix_start")
+            if not it.get("name"):
+                it["name"] = ev.get("name", "")
+            if not it.get("tag"):
+                it["tag"] = ev.get("tag", "")
+        elif kind == "text":
+            it.update(text=ev.get("text", ""), status=ev.get("status"),
+                      rt=ev.get("rt"), live=False)
+            if not it.get("name"):
+                it["name"] = ev.get("name", "")
+            if not it.get("tag"):
+                it["tag"] = ev.get("tag", "")
+            if it.get("unix_start") is None:
+                it["unix_start"] = ev.get("unix_start")
+
+    def _txn_segments(self, it):
+        """Styled (text, tags) segments for one transmission line."""
+        def hhmmss(u):
+            return clock.local_iso(u)[11:19] if u else "--:--:--"
+        segs = []
+        if it.get("unix_stop"):
+            segs.append((f"{hhmmss(it.get('unix_start'))}–{hhmmss(it['unix_stop'])}",
+                         ("tmuted",)))
+        else:
+            segs.append((hhmmss(it.get("unix_start")), ("tmuted",)))
+        if it.get("live") and not it.get("unix_stop"):
+            segs.append(("  ●REC", ("tlive",)))
+        tag = it.get("tag", "")
+        label = (tag + " " if tag else "") + (it.get("name", "") or "")
+        segs.append(("  " + label, (tag,) if tag in self.tags else ()))
+        if it.get("text"):
+            segs.append(('  “' + it["text"] + '”', ()))
+        elif it.get("status") == "no_speech":
+            segs.append(("  (no intelligible speech)", ("tmuted",)))
+        elif it.get("status") == "error":
+            segs.append(("  (transcription error)", ("terr",)))
+        elif it.get("unix_stop"):
+            segs.append(("  …transcribing", ("tmuted",)))
+        else:
+            segs.append(("  …", ("tmuted",)))
+        return segs
+
+    def _txn_rerender(self):
+        # cap history so a long session doesn't grow unbounded
+        CAP = 400
+        if len(self._txn_order) > CAP:
+            for key in self._txn_order[:-CAP]:
+                self._txn_items.pop(key, None)
+            self._txn_order = self._txn_order[-CAP:]
+        at_bottom = self.txn.yview()[1] >= 0.999
+        self.txn.configure(state="normal")
+        # destroy the previous embedded play buttons before clearing the text
+        # (window_create widgets aren't freed by delete())
+        for b in self._txn_btns:
+            try:
+                b.destroy()
+            except Exception:
+                pass
+        self._txn_btns = []
+        self._txn_line_keys = []
+        self.txn.delete("1.0", "end")
+        for key in self._txn_order:
+            it = self._txn_items.get(key)
+            if it is None:
+                continue
+            # per-row play button, next to the timestamp. Finalized recordings get
+            # a live ▶; an in-progress one gets a muted dot (nothing to play yet).
+            if it.get("unix_stop") and os.path.exists(key):
+                btn = tk.Label(self.txn, text=" ▶ ", bg=PANEL2, fg=ACTIVE,
+                               font=("Menlo", 10, "bold"), cursor="hand2")
+                btn.bind("<Button-1>", lambda e, k=key: self._play_key(k))
+                btn.bind("<Enter>", lambda e, b=btn: b.config(bg=PANEL))
+                btn.bind("<Leave>", lambda e, b=btn: b.config(bg=PANEL2))
+            else:
+                btn = tk.Label(self.txn, text=" · ", bg="#16201a", fg=MUTED,
+                               font=("Menlo", 10, "bold"))
+            self.txn.window_create("end", window=btn, padx=3)
+            self._txn_btns.append(btn)
+            for text, tags in self._txn_segments(it):
+                self.txn.insert("end", text, tags)
+            self.txn.insert("end", "\n")
+            self._txn_line_keys.append(key)
+        # paint selection + now-playing row highlights
+        play_key = (self._play_path if self.player
+                    and self.player.state in ("playing", "paused") else None)
+        for hk, name in ((self._txn_selected, "tsel"), (play_key, "tplaying")):
+            if hk in self._txn_line_keys:
+                ln = self._txn_line_keys.index(hk) + 1
+                self.txn.tag_add(name, f"{ln}.0", f"{ln}.end+1c")
         self.txn.configure(state="disabled")
+        if at_bottom:
+            self.txn.see("end")
+
+    def _update_stt_status(self):
+        if not hasattr(self, "_txn_label") or not self._txn_label.winfo_ismapped():
+            return
+        svc = self.stt_service
+        base = "TRANSCRIPTS"
+        if svc is None:
+            self._txn_label.config(text=base)
+            return
+        s = svc.status
+        st = s.get("state")
+        if st == "loading":
+            txt = f"{base}   ·   loading {svc.provider.name} model…"
+        elif st == "transcribing":
+            q = s.get("queued", 0)
+            extra = f"  (+{q} queued)" if q else ""
+            txt = f"{base}   ·   ⟳ transcribing {s.get('current', '')}{extra}"
+        elif st == "error":
+            txt = f"{base}   ·   engine unavailable"
+        else:
+            txt = base
+        self._txn_label.config(text=txt)
 
     # ---- settings ----
     def _load_settings(self):
@@ -1944,7 +2302,7 @@ class ScannerGUI:
         c = self.scanner.cfg
         for k in ("squelch_mode", "global_sql", "auto_margin", "settle_ms",
                   "hold_s", "priority_interval", "record", "mute_squelch",
-                  "stt_enabled"):
+                  "stt_enabled", "stt_engine", "stt_model"):
             if k in d:
                 c[k] = d[k]
         # clamp global squelch to the slider's range so a bad/stale value (e.g.
@@ -1968,7 +2326,8 @@ class ScannerGUI:
         c = self.scanner.cfg
         d = {k: c[k] for k in ("squelch_mode", "global_sql", "auto_margin",
                                "settle_ms", "hold_s", "priority_interval",
-                               "record", "mute_squelch", "stt_enabled")}
+                               "record", "mute_squelch", "stt_enabled",
+                               "stt_engine", "stt_model")}
         d["enabled_tags"] = sorted(c["enabled_tags"])
         d["lockout"] = sorted(c["lockout"])
         d["priority_freqs"] = sorted(c["priority_freqs"])

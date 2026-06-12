@@ -173,7 +173,7 @@ class WavRecorder:
     """
 
     def __init__(self, db=None, outdir=RECORD_DIR, samplerate=SAMPLERATE,
-                 log=None, on_record=None):
+                 log=None, on_record=None, on_start=None):
         self.db = db if db is not None else RecordingsDB()
         self.outdir = outdir
         self.sr = samplerate
@@ -181,6 +181,13 @@ class WavRecorder:
         # called with the inserted recording dict (incl. "id") after each WAV is
         # finalized — the GUI wires this to the transcription service.
         self.on_record = on_record
+        # called at signal onset (when the WAV opens) with {wav_path, name, tag,
+        # freq_hz, unix_start, iso_start} so the UI can list the transmission
+        # live, before it ends. wav_path is the stable key across start/stop/text.
+        self.on_start = on_start
+        # called with the wav_path when a started transmission is discarded as a
+        # blip (< MIN_DUR_S) so the UI can drop the live line it already showed.
+        self.on_discard = None
         os.makedirs(outdir, exist_ok=True)
         self._meta = {}
         self._reset()
@@ -227,6 +234,11 @@ class WavRecorder:
                 os.remove(path)
             except OSError:
                 pass
+            if self.on_discard is not None:
+                try:
+                    self.on_discard(path)     # drop the live UI line we showed
+                except Exception:
+                    pass
             return
         stop = start + dur                # sample-accurate stop time
         peak_dbfs = 20.0 * math.log10(peak) if peak > 0 else -120.0
@@ -264,6 +276,16 @@ class WavRecorder:
         self._wav = w
         self._frames = 0
         self._peak = 0.0
+        if self.on_start is not None:
+            try:
+                self.on_start({"wav_path": self._path,
+                               "name": self._meta.get("name", ""),
+                               "tag": self._meta.get("tag", ""),
+                               "freq_hz": int(self._meta.get("freq_hz", 0)),
+                               "unix_start": t_unix,
+                               "iso_start": clock.utc_iso(t_unix)})
+            except Exception:
+                pass
 
     def _write(self, audio):
         np = _lazy_np()
