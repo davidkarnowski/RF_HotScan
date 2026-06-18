@@ -1154,8 +1154,14 @@ class ScannerGUI:
         meter_wrap = tk.Frame(root, bg=BG)
         meter_wrap.pack(fill="x", padx=10)
         self.meter = tk.Canvas(meter_wrap, height=26, bg=PANEL2,
-                               highlightthickness=0)
+                               highlightthickness=0, cursor="sb_h_double_arrow")
         self.meter.pack(fill="x")
+        # The red threshold marker is click-draggable: it sets the GLOBAL squelch
+        # (and switches to global mode), keeping the marker, slider and readout
+        # aligned. Push to the backend on release to avoid spamming refresh_sql.
+        self.meter.bind("<Button-1>", self._on_meter_drag)
+        self.meter.bind("<B1-Motion>", self._on_meter_drag)
+        self.meter.bind("<ButtonRelease-1>", self._on_meter_release)
 
         body = tk.Frame(root, bg=BG)
         body.pack(fill="both", expand=True, padx=10, pady=8)
@@ -1176,25 +1182,40 @@ class ScannerGUI:
                   lambda e: ctrl_canvas.configure(
                       scrollregion=ctrl_canvas.bbox("all")))
 
+        self._ctrl_canvas = ctrl_canvas
         self._build_controls(ctrl)
 
-        # Two-finger trackpad / scroll-wheel scrolling. macOS Tk sends
-        # <MouseWheel> with a small delta; bind it on every control widget (not
-        # just the canvas) so it works wherever the pointer is over the panel.
-        def _wheel(e):
-            ctrl_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units")
-            return "break"
-
-        def _bind_wheel(w):
-            w.bind("<MouseWheel>", _wheel)
-            for child in w.winfo_children():
-                _bind_wheel(child)
-        _bind_wheel(ctrl_canvas)
         rightcol = tk.Frame(body, bg=BG)
         rightcol.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self._build_taglist(rightcol)
         self._build_channel_list(rightcol)
         self._build_log(rightcol)
+
+        # Two-finger trackpad / scroll-wheel scrolling that works ANYWHERE over a
+        # panel, not just on its scrollbar. macOS Tk delivers <MouseWheel> to the
+        # widget under the pointer and ttk widgets (Scale/Combobox/Treeview) eat
+        # it, so a per-widget bind is unreliable. Instead route one app-global
+        # handler by pointer location: walk up from the hovered widget to the
+        # nearest known scrollable and scroll that. Unknown areas (e.g. the log /
+        # transcript Text panes) fall through to their own default scrolling.
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+
+    def _on_mousewheel(self, e):
+        """Route a wheel/two-finger scroll to whichever panel the pointer is over
+        (the scrollable left control canvas or the station-listing tree), so the
+        whole panel area scrolls — not just its scrollbar."""
+        w = self.root.winfo_containing(e.x_root, e.y_root)
+        step = -1 if e.delta > 0 else 1
+        node = w
+        while node is not None:
+            if node is getattr(self, "_ctrl_canvas", None):
+                self._ctrl_canvas.yview_scroll(step, "units")
+                return "break"
+            if node is getattr(self, "tree", None):
+                self.tree.yview_scroll(step, "units")
+                return "break"
+            node = getattr(node, "master", None)
+        return None
 
     def _section(self, parent, text):
         tk.Label(parent, text=text, bg=PANEL, fg=MUTED,
@@ -1756,6 +1777,7 @@ class ScannerGUI:
                        "unix_start": m.get("unix_start"),
                        "unix_stop": m.get("unix_stop"),
                        "duration_s": m.get("duration_s"),
+                       "rec_id": m.get("id"),       # DB id, for re-transcription
                        "name": m.get("name", ""), "tag": m.get("tag", "")})
         svc = self.stt_service
         if svc is not None:
@@ -1795,6 +1817,31 @@ class ScannerGUI:
         if not self._txn_transport.winfo_ismapped():
             self._txn_transport.pack(fill="x", pady=(2, 0))
         self._update_play_ui()
+        self._txn_rerender()
+
+    def _retranscribe_key(self, key):
+        """Re-run this recording through the CURRENTLY-selected model (changing the
+        Model dropdown rebuilds self.stt_service, so this always uses the active
+        engine). The new text arrives as a normal transcript event and replaces
+        this row's text in place."""
+        svc = self.stt_service
+        if svc is None:
+            self.scanner.log("Enable transcription to re-transcribe")
+            return
+        it = self._txn_items.get(key)
+        if not it or not it.get("unix_stop") or not os.path.exists(key):
+            return
+        if it.get("rec_id") is None:
+            self.scanner.log("Can't re-transcribe (no recording id)")
+            return
+        svc.enqueue({"rec_id": it["rec_id"], "wav_path": key,
+                     "name": it.get("name", ""), "tag": it.get("tag", ""),
+                     "unix_start": it.get("unix_start"),
+                     "duration": it.get("duration_s", 1.0)})
+        it["text"] = ""           # show "…transcribing" until the new result lands
+        it["status"] = None
+        eng = self.var_stt_engine.get() if hasattr(self, "var_stt_engine") else ""
+        self.scanner.log(f"Re-transcribing {it.get('name', '')} · {eng}")
         self._txn_rerender()
 
     def _toggle_play(self):
@@ -2173,8 +2220,18 @@ class ScannerGUI:
         self.live_dot.itemconfig(self._live_oval, fill=ACTIVE if listening else MUTED)
         self.lbl_live.config(text="● LIVE" if listening else "idle",
                              fg=ACTIVE if listening else MUTED)
-        self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {thr:.0f})")
-        self._draw_meter(s, thr)
+        # Keep the meter marker, the slider readout and the slider itself aligned
+        # on ONE value. In global mode the effective threshold IS the global
+        # squelch, so drive the marker straight from the slider var (updates live
+        # even while stopped). In auto mode the marker shows the computed floor.
+        if self.sql_mode.get() == "global":
+            meter_thr = self.global_sql.get()
+        else:
+            meter_thr = thr
+        # Belt-and-suspenders: the blue readout must always match the slider value.
+        self._gsql_label.config(text=f"{self.global_sql.get():.0f} dBFS")
+        self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {meter_thr:.0f})")
+        self._draw_meter(s, meter_thr)
         self._update_tree(ui)
         self._drain_log()
         self._drain_transcripts()
@@ -2237,12 +2294,36 @@ class ScannerGUI:
         active = s >= thr
         c.create_rectangle(0, 0, x(s), h, fill=ACTIVE if active else ACCENT,
                            width=0)
-        tx = x(thr)
-        c.create_line(tx, 0, tx, h, fill=HOT, width=2)
         for db in range(int(METER_MIN), int(METER_MAX) + 1, 20):
             c.create_line(x(db), h - 5, x(db), h, fill=MUTED)
             c.create_text(x(db) + 2, 8, text=f"{db}", anchor="w", fill=MUTED,
                           font=("Menlo", 8))
+        # draggable squelch marker: a bright line + a grab handle at the top
+        tx = x(thr)
+        c.create_line(tx, 0, tx, h, fill=HOT, width=2)
+        c.create_polygon(tx - 5, 0, tx + 5, 0, tx, 7, fill=HOT, outline="")
+
+    def _meter_db(self, event):
+        """Mouse x on the meter -> dB, clamped to the global-squelch range."""
+        w = self.meter.winfo_width() or 800
+        frac = min(1.0, max(0.0, event.x / w))
+        db = METER_MIN + frac * (METER_MAX - METER_MIN)
+        return max(-100.0, min(-10.0, db))      # global squelch slider range
+
+    def _on_meter_drag(self, event):
+        """Drag the red marker to set the global squelch. Switches to global mode
+        so the manual threshold takes effect; updates the slider + readout live.
+        Backend push happens on release (see _on_meter_release)."""
+        db = round(self._meter_db(event), 1)
+        if self.sql_mode.get() != "global":
+            self.sql_mode.set("global")
+            self.scanner.set_cfg(squelch_mode="global")
+        self.global_sql.set(db)                 # trace -> readout; refresh -> marker
+        self.scanner.set_cfg(global_sql=db)     # so effective_threshold sees it now
+
+    def _on_meter_release(self, event):
+        """Commit the dragged squelch to the backend once (avoids log/IO spam)."""
+        self._apply_sliders()
 
     def _update_tree(self, ui):
         cur = ui.get("cur")
@@ -2352,7 +2433,8 @@ class ScannerGUI:
                       tag=ev.get("tag", ""), live=True)
         elif kind == "stop":
             it.update(unix_stop=ev.get("unix_stop"),
-                      duration_s=ev.get("duration_s"), live=False)
+                      duration_s=ev.get("duration_s"),
+                      rec_id=ev.get("rec_id"), live=False)
             if it.get("unix_start") is None:
                 it["unix_start"] = ev.get("unix_start")
             if not it.get("name"):
@@ -2419,19 +2501,29 @@ class ScannerGUI:
             it = self._txn_items.get(key)
             if it is None:
                 continue
-            # per-row play button, next to the timestamp. Finalized recordings get
-            # a live ▶; an in-progress one gets a muted dot (nothing to play yet).
+            # per-row buttons next to the timestamp. Finalized recordings get a
+            # ▶ play and a ↻ re-transcribe (with the currently-selected model); an
+            # in-progress one gets a muted dot (nothing to play/re-run yet).
             if it.get("unix_stop") and os.path.exists(key):
                 btn = tk.Label(self.txn, text=" ▶ ", bg=PANEL2, fg=ACTIVE,
                                font=("Menlo", 10, "bold"), cursor="hand2")
                 btn.bind("<Button-1>", lambda e, k=key: self._play_key(k))
                 btn.bind("<Enter>", lambda e, b=btn: b.config(bg=PANEL))
                 btn.bind("<Leave>", lambda e, b=btn: b.config(bg=PANEL2))
+                self.txn.window_create("end", window=btn, padx=3)
+                self._txn_btns.append(btn)
+                rb = tk.Label(self.txn, text=" ↻ ", bg=PANEL2, fg=ACCENT,
+                              font=("Menlo", 10, "bold"), cursor="hand2")
+                rb.bind("<Button-1>", lambda e, k=key: self._retranscribe_key(k))
+                rb.bind("<Enter>", lambda e, b=rb: b.config(bg=PANEL))
+                rb.bind("<Leave>", lambda e, b=rb: b.config(bg=PANEL2))
+                self.txn.window_create("end", window=rb, padx=1)
+                self._txn_btns.append(rb)
             else:
                 btn = tk.Label(self.txn, text=" · ", bg="#16201a", fg=MUTED,
                                font=("Menlo", 10, "bold"))
-            self.txn.window_create("end", window=btn, padx=3)
-            self._txn_btns.append(btn)
+                self.txn.window_create("end", window=btn, padx=3)
+                self._txn_btns.append(btn)
             for text, tags in self._txn_segments(it):
                 self.txn.insert("end", text, tags)
             self.txn.insert("end", "\n")
