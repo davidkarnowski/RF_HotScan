@@ -309,13 +309,72 @@ class MLXWhisperProvider(SttProvider):
         return (res.get("text", "") if isinstance(res, dict) else "").strip()
 
 
+DEFAULT_VOXTRAL = "mzbac/voxtral-mini-3b-4bit-mixed"
+
+
+class VoxtralMLXProvider(SttProvider):
+    """Mistral Voxtral Mini (audio LLM) on Apple MLX, in pure transcription mode.
+    Offline. Heavier + slower than Parakeet (~1x realtime) but more accurate; only
+    listed when its weights are already in the HuggingFace cache."""
+
+    name = "voxtral"
+    wants_audio = False           # the processor reads the WAV path itself
+
+    def __init__(self, model_id=DEFAULT_VOXTRAL):
+        self.model_id = model_id
+        self._model = None
+        self._proc = None
+
+    def available(self):
+        import importlib.util
+        if importlib.util.find_spec("mlx_voxtral") is None:
+            return False
+        ok, _ = self.ensure_ready()
+        return ok
+
+    def ensure_ready(self):
+        try:
+            from huggingface_hub import scan_cache_dir
+            for r in scan_cache_dir().repos:
+                if r.repo_id != self.model_id:
+                    continue
+                names = [f.file_name for rev in r.revisions for f in rev.files]
+                if any(n.endswith((".safetensors", ".npz")) for n in names):
+                    return True, "ok"
+                return False, f"model '{self.model_id}' weights incomplete"
+            return False, f"model '{self.model_id}' not in HuggingFace cache"
+        except Exception as e:
+            return False, f"hf cache scan failed: {e}"
+
+    def warm_up(self):
+        from mlx_voxtral import VoxtralForConditionalGeneration, VoxtralProcessor
+        if self._model is None:
+            self._model = VoxtralForConditionalGeneration.from_pretrained(self.model_id)
+            self._proc = VoxtralProcessor.from_pretrained(self.model_id)
+
+    def transcribe(self, audio, sample_rate=TARGET_SR, wav_path=None):
+        if not wav_path:
+            raise ValueError("VoxtralMLXProvider needs a wav_path")
+        import mlx.core as mx
+        self.warm_up()
+        inputs = self._proc.apply_transcrition_request(language="en", audio=wav_path)
+        out = self._model.generate(input_ids=inputs.input_ids,
+                                   input_features=inputs.input_features,
+                                   max_new_tokens=256, temperature=0.0)
+        text = self._proc.decode(out[0][inputs.input_ids.shape[1]:],
+                                 skip_special_tokens=True)
+        mx.clear_cache()          # free the MLX buffer cache between clips (3B model)
+        return (text or "").strip()
+
+
 # Registry of known providers, in auto-preference order (local first).
 _PROVIDERS = {
     "parakeet-mlx": lambda model=None: ParakeetMLXProvider(model or PARAKEET_MODEL),
     "whisper-mlx": lambda model=None: MLXWhisperProvider(model or DEFAULT_WHISPER_MLX),
+    "voxtral": lambda model=None: VoxtralMLXProvider(model or DEFAULT_VOXTRAL),
     "openai": lambda model=None: OpenAIProvider(model or OPENAI_MODEL),
 }
-_AUTO_ORDER = ["parakeet-mlx", "whisper-mlx", "openai"]
+_AUTO_ORDER = ["parakeet-mlx", "whisper-mlx", "voxtral", "openai"]
 
 
 def make_provider(prefer="auto", model=None):
@@ -359,6 +418,9 @@ def engine_options():
         if MLXWhisperProvider(mid).available():
             opts.append({"label": f"Whisper {label} · local",
                          "engine": "whisper-mlx", "model": mid})
+    if VoxtralMLXProvider().available():
+        opts.append({"label": "Voxtral Mini 3B · local",
+                     "engine": "voxtral", "model": None})
     if OpenAIProvider().available():
         for mid, label in OPENAI_MODELS:
             opts.append({"label": f"{label} · OpenAI cloud",
