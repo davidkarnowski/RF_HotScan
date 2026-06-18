@@ -1965,6 +1965,7 @@ class ScannerGUI:
     def _on_tree_double(self, event):
         # Double-click a row to tune GQRX there. If a scan is running, pause it
         # first so the manual tune isn't immediately overwritten by the sweep.
+        # Also ensure audio is enabled (AF gain at least 0 dB) so tuning = hearing.
         row = self.tree.identify_row(event.y)
         ch = self._chan_for_iid(row) if row else None
         if ch is None:
@@ -1975,6 +1976,10 @@ class ScannerGUI:
         if self.scanner.run.is_set():
             self.scanner.run.clear()
             self.btn_start.config(text="▶ Scan")
+        # Unmute audio if gain is below 0 dB (likely muted or too quiet)
+        if self.af_gain.get() < 0:
+            self.af_gain.set(0)
+            self.scanner.request("set_af", db=0)
         self.scanner.request("goto", freq=ch["freq"])
 
     # ---- periodic refresh ----
