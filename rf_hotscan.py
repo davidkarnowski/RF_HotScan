@@ -402,13 +402,17 @@ class Scanner:
             "stt_engine": "auto",   # provider name: parakeet-mlx | whisper-mlx | openai
             "stt_model": "",        # provider-specific model id ("" = provider default)
             "priority_interval": 6.0,
+            "last_listen_freq": None,   # Hz last manually tuned (playhead seed)
         }
         self.band_floor = {}
         self.last_active = {}
 
         self.ui = {"state": "STOPPED", "cur": None, "strength": -120.0,
                    "thresh": -50.0, "msg": "", "gqrx_sql": None, "af": None,
-                   "lna": None, "powers": {}, "sweep_n": 0, "rate": 0.0}
+                   "lna": None, "powers": {}, "sweep_n": 0, "rate": 0.0,
+                   "tuned": None, "listening": False}
+        self._manual = None          # channel we're manually listening to (None = scan-driven)
+        self._manual_thr = -50.0     # squelch threshold for the manual-listen channel
         self._sweep_n = 0
         self._rate_t0 = 0.0
         self._rate_h0 = 0
@@ -549,10 +553,27 @@ class Scanner:
                     time.sleep(0.25)
                     continue
                 if not self.run.is_set():
-                    self._set_ui(state="STOPPED")
-                    self._maybe_poll_sql()
-                    time.sleep(0.1)
+                    if self._manual is not None:
+                        # Manually parked on a frequency (playhead). Keep the
+                        # audio alive and refresh the meter from the live level;
+                        # do NOT retune.
+                        try:
+                            s = self.client.strength()
+                            self._set_ui(state="LISTENING", strength=s,
+                                         thresh=self._manual_thr)
+                        except Exception:
+                            self._set_ui(state="LISTENING")
+                        time.sleep(0.15)
+                    else:
+                        self._set_ui(state="STOPPED")
+                        self._maybe_poll_sql()
+                        time.sleep(0.1)
                     continue
+
+                # A scan is starting: drop any manual-listen audio so the sweep
+                # owns the dongle (the scan loop drives its own hold audio).
+                if self._manual is not None:
+                    self._stop_listen()
 
                 lst = self.active_list()
                 if not lst:
@@ -675,11 +696,14 @@ class Scanner:
         # squelch threshold so the backend can gate/record the transmission.
         if hasattr(self.client, "on_hold"):
             self.client.on_hold(ch, thr)
+        # reflect the live tune + audio in the playhead (dot green, freq shown)
+        self._set_ui(tuned=ch["freq"], listening=True)
         try:
             self._hold_loop(ch, priority, now)
         finally:
             if hasattr(self.client, "on_resume"):
                 self.client.on_resume()
+            self._set_ui(listening=False)
 
     def _hold_loop(self, ch, priority, now):
         thr = self.effective_threshold(ch["freq"])
@@ -752,21 +776,55 @@ class Scanner:
                         db = kw.get("db", 0.0)
                         self.client.set_lna(db)
                         self.log(f"RF/LNA gain set {db:.0f} dB")
-                elif name == "goto":
-                    ch = self._channel_by_freq(kw["freq"])
-                    if ch and self.client.connected:
-                        self._tune(ch, force_sql=True)
-                        s = self._settled_strength()
-                        self._set_ui(cur=ch, strength=s,
-                                     thresh=self.effective_threshold(ch["freq"]))
-                        self.log(f"Tuned GQRX to {ch['name']} "
-                                 f"({ch['freq']/1e6:.4f} MHz)")
-                        self._verify(ch)
+                elif name in ("goto", "listen_freq"):
+                    self._listen_freq(int(kw["freq"]))
+                elif name == "stop_listen":
+                    self._stop_listen()
             except (ConnectionError, OSError) as e:
                 logger.warning("socket error in action %s: %s", name, e)
                 self._handle_disconnect()
             except Exception:
                 logger.error("action %s failed:\n%s", name, traceback.format_exc())
+
+    # ---- manual listen (the "radio playhead") ----
+    def _listen_freq(self, freq):
+        """Manually tune a frequency and start live audio (RTL), staying parked
+        there until stop_listen or a scan starts. Works for any frequency, not
+        just bookmarked ones. Pauses scanning so the sweep can't retune away."""
+        if not self.client.connected:
+            return
+        self.run.clear()                         # leave scan mode; park here
+        ch = self._channel_by_freq(freq)
+        if ch is None:                           # not a bookmark — synthesize NBFM
+            ch = {"freq": int(freq), "mode": "FM", "bw": 12500,
+                  "name": f"{freq/1e6:.4f} MHz", "tag": "", "cid": -1}
+        thr = self._tune(ch, force_sql=True)
+        self._manual = ch
+        self._manual_thr = thr
+        self.set_cfg(last_listen_freq=int(freq))   # seed the playhead next launch
+        # RTL produces audio on the on_hold hook; GQRX makes audio itself on tune.
+        if hasattr(self.client, "on_hold"):
+            self.client.on_hold(ch, thr)
+        self._set_ui(state="LISTENING", cur=ch, tuned=int(freq),
+                     listening=True, thresh=thr)
+        self.log(f"Listening {ch['name']} ({freq/1e6:.4f} MHz)")
+        self._verify(ch)
+
+    def _stop_listen(self):
+        """Stop manual-listen audio and release the parked frequency."""
+        if hasattr(self.client, "on_resume"):
+            try:
+                self.client.on_resume()          # stops audio + finalizes recording
+            except Exception:
+                logger.debug("on_resume during stop_listen failed", exc_info=True)
+        elif hasattr(self.client, "set_af"):
+            try:
+                self.client.set_af(-60.0)        # GQRX: soft-mute (no audio stream to stop)
+            except Exception:
+                pass
+        self._manual = None
+        self._set_ui(state="STOPPED", listening=False)
+        self.log("Stopped listening")
 
     def _reconnect(self):
         is_rtl = hasattr(self.client, "sweep")
@@ -1042,9 +1100,45 @@ class ScannerGUI:
         self.lbl_name = tk.Label(left, text="Idle", bg=PANEL, fg=FG,
                                  font=("Helvetica", 22, "bold"))
         self.lbl_name.pack(side="top", anchor="w", pady=(4, 0))
-        self.lbl_freq = tk.Label(left, text="—  MHz", bg=PANEL, fg=ACCENT,
-                                 font=("Helvetica", 16))
-        self.lbl_freq.pack(side="top", anchor="w")
+
+        # ---- radio playhead: editable freq + ▶/⏹ + LIVE dot ----
+        # The entry is the authoritative tuning display: it shows the actually-
+        # tuned frequency (ui["tuned"]) and is rewritten by _refresh EXCEPT while
+        # the user is editing it (self._freq_editing), so typing isn't clobbered.
+        head = tk.Frame(left, bg=PANEL)
+        head.pack(side="top", anchor="w", pady=(2, 0))
+        self._freq_editing = False
+        _seed = self.scanner.get_cfg("last_listen_freq")
+        self.freq_var = tk.StringVar(value=f"{_seed/1e6:.4f}" if _seed else "—")
+        self.ent_freq = tk.Entry(head, textvariable=self.freq_var, width=11,
+                                 bg=PANEL2, fg=ACCENT, insertbackground=ACCENT,
+                                 disabledbackground=PANEL2, relief="flat",
+                                 font=("Menlo", 20, "bold"), justify="left")
+        self.ent_freq.pack(side="left", ipady=2)
+        tk.Label(head, text="MHz", bg=PANEL, fg=MUTED,
+                 font=("Helvetica", 11)).pack(side="left", padx=(4, 10))
+        self.btn_listen = self._row_btn_on(head, " ▶ ", ACTIVE,
+                                           self._playhead_play)
+        self.btn_listen.pack(side="left")
+        self.btn_stop = self._row_btn_on(head, " ⏹ ", HOT, self._playhead_stop)
+        self.btn_stop.pack(side="left", padx=(4, 10))
+        self.live_dot = tk.Canvas(head, width=14, height=14, bg=PANEL,
+                                  highlightthickness=0)
+        self.live_dot.pack(side="left")
+        self._live_oval = self.live_dot.create_oval(2, 2, 12, 12, fill=MUTED,
+                                                    outline="")
+        self.lbl_live = tk.Label(head, text="idle", bg=PANEL, fg=MUTED,
+                                 font=("Helvetica", 10, "bold"))
+        self.lbl_live.pack(side="left", padx=(4, 0))
+        self.ent_freq.bind("<FocusIn>", lambda e: setattr(self, "_freq_editing", True))
+        self.ent_freq.bind("<Return>", self._playhead_play)
+        self.ent_freq.bind("<Escape>", lambda e: self._playhead_revert())
+        self.ent_freq.bind("<FocusOut>", lambda e: self._playhead_revert())
+
+        # secondary line: held/scanned channel mode + status (was lbl_freq)
+        self.lbl_freq = tk.Label(left, text="—", bg=PANEL, fg=MUTED,
+                                 font=("Helvetica", 12))
+        self.lbl_freq.pack(side="top", anchor="w", pady=(2, 0))
         right = tk.Frame(banner, bg=PANEL)
         right.pack(side="right", fill="y", padx=14, pady=10)
         self.lbl_state = tk.Label(right, text="STOPPED", bg=PANEL, fg=MUTED,
@@ -1471,6 +1565,8 @@ class ScannerGUI:
         self.client = new
         sc.client = new
         sc.orig = None
+        sc._manual = None               # drop any manual-listen on backend swap
+        sc._set_ui(listening=False)
         sc._last_mode = sc._last_band = sc._last_sql = None
         sc.band_floor = {}              # dBFS scale differs between backends
         self._af_inited = self._rf_inited = False
@@ -1963,9 +2059,8 @@ class ScannerGUI:
         return "break"
 
     def _on_tree_double(self, event):
-        # Double-click a row to tune GQRX there. If a scan is running, pause it
-        # first so the manual tune isn't immediately overwritten by the sweep.
-        # Also ensure audio is enabled (AF gain at least 0 dB) so tuning = hearing.
+        # Double-click a row -> tune AND start live audio there (pauses the scan
+        # so the sweep can't retune away). This is the "double-click = hear it".
         row = self.tree.identify_row(event.y)
         ch = self._chan_for_iid(row) if row else None
         if ch is None:
@@ -1976,11 +2071,58 @@ class ScannerGUI:
         if self.scanner.run.is_set():
             self.scanner.run.clear()
             self.btn_start.config(text="▶ Scan")
-        # Unmute audio if gain is below 0 dB (likely muted or too quiet)
-        if self.af_gain.get() < 0:
-            self.af_gain.set(0)
-            self.scanner.request("set_af", db=0)
-        self.scanner.request("goto", freq=ch["freq"])
+        self.freq_var.set(f"{ch['freq']/1e6:.4f}")
+        self.scanner.request("listen_freq", freq=ch["freq"])
+
+    # ---- radio playhead (manual tune + listen) ----
+    def _row_btn_on(self, parent, text, fg, cmd):
+        """A small dark label-button (readable glyph on macOS aqua, where a
+        tk.Button ignores bg/fg). Click runs cmd."""
+        b = tk.Label(parent, text=text, bg=PANEL2, fg=fg,
+                     font=("Menlo", 15, "bold"), cursor="hand2")
+        b.bind("<Button-1>", lambda e: cmd())
+        b.bind("<Enter>", lambda e: b.config(bg=PANEL))
+        b.bind("<Leave>", lambda e: b.config(bg=PANEL2))
+        return b
+
+    def _parse_freq(self, text):
+        """User-typed frequency -> Hz, or None if invalid. Accepts MHz
+        (462.5125), raw Hz (462512500), and stray spaces/commas. Clamps to the
+        RTL tuner range (~24-1766 MHz)."""
+        s = (text or "").strip().replace(",", "").replace(" ", "")
+        try:
+            v = float(s)
+        except (ValueError, TypeError):
+            return None
+        hz = int(round(v if v > 1e6 else v * 1e6))   # >1e6 already Hz, else MHz
+        return hz if 24_000_000 <= hz <= 1_766_000_000 else None
+
+    def _playhead_play(self, event=None):
+        hz = self._parse_freq(self.freq_var.get())
+        if hz is None:
+            self._playhead_revert()
+            self.scanner.log("Invalid frequency — use MHz, e.g. 462.5125")
+            return
+        self._freq_editing = False
+        self.root.focus_set()                 # drop focus so _refresh can sync
+        if self.scanner.run.is_set():          # leave scan mode; park manually
+            self.scanner.run.clear()
+            self.btn_start.config(text="▶ Scan")
+        self.scanner.request("listen_freq", freq=hz)
+
+    def _playhead_stop(self):
+        if self.scanner.run.is_set():          # also pause a running scan
+            self.scanner.run.clear()
+            self.btn_start.config(text="▶ Scan")
+        self.scanner.request("stop_listen")
+
+    def _playhead_revert(self):
+        """Abandon an in-progress edit and show the actual tuned frequency
+        (or the last manually-tuned one if nothing is tuned yet)."""
+        self._freq_editing = False
+        ui = self.scanner.snapshot_ui()
+        f = ui.get("tuned") or self.scanner.get_cfg("last_listen_freq")
+        self.freq_var.set(f"{f/1e6:.4f}" if f else "—")
 
     # ---- periodic refresh ----
     def _refresh(self):
@@ -2015,13 +2157,22 @@ class ScannerGUI:
                 self.tag_chip.config(text=f" {cur['tag']} ", bg=color,
                                      fg=contrast_fg(color))
                 self.lbl_name.config(text=cur["name"])
-                self.lbl_freq.config(
-                    text=f"{cur['freq']/1e6:.4f}  MHz   ·   {cur['mode']}")
+                self.lbl_freq.config(text=f"{cur['mode']}  ·  {cur['name']}")
             else:
                 # idle (e.g. just after calibration finished) — clear the banner
                 self.tag_chip.config(text="  —  ", bg=PANEL2, fg=FG)
                 self.lbl_name.config(text="Idle")
-                self.lbl_freq.config(text="—  MHz")
+                self.lbl_freq.config(text="—")
+        # ---- playhead sync ----
+        # Show the actually-tuned frequency, EXCEPT while the user is editing the
+        # field (so typing isn't overwritten by the refresh tick).
+        tuned = ui.get("tuned")
+        if tuned and not self._freq_editing:    # keep the seeded value when untuned
+            self.freq_var.set(f"{tuned/1e6:.4f}")
+        listening = bool(ui.get("listening"))
+        self.live_dot.itemconfig(self._live_oval, fill=ACTIVE if listening else MUTED)
+        self.lbl_live.config(text="● LIVE" if listening else "idle",
+                             fg=ACTIVE if listening else MUTED)
         self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {thr:.0f})")
         self._draw_meter(s, thr)
         self._update_tree(ui)
@@ -2328,7 +2479,7 @@ class ScannerGUI:
         c = self.scanner.cfg
         for k in ("squelch_mode", "global_sql", "auto_margin", "settle_ms",
                   "hold_s", "priority_interval", "record", "mute_squelch",
-                  "stt_enabled", "stt_engine", "stt_model"):
+                  "stt_enabled", "stt_engine", "stt_model", "last_listen_freq"):
             if k in d:
                 c[k] = d[k]
         # clamp global squelch to the slider's range so a bad/stale value (e.g.
@@ -2353,7 +2504,7 @@ class ScannerGUI:
         d = {k: c[k] for k in ("squelch_mode", "global_sql", "auto_margin",
                                "settle_ms", "hold_s", "priority_interval",
                                "record", "mute_squelch", "stt_enabled",
-                               "stt_engine", "stt_model")}
+                               "stt_engine", "stt_model", "last_listen_freq")}
         d["enabled_tags"] = sorted(c["enabled_tags"])
         d["lockout"] = sorted(c["lockout"])
         d["priority_freqs"] = sorted(c["priority_freqs"])
