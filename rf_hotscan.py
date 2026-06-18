@@ -846,10 +846,13 @@ class Scanner:
                     logger.info("captured original GQRX state: %s", self.orig)
                 except Exception as e:
                     logger.warning("could not capture GQRX state: %s", e)
-            # Reflect GQRX's current squelch + audio/RF gain in the GUI.
+            # Reflect GQRX's current squelch + audio/RF gain in the GUI. The
+            # squelch mirror is GQRX-only (RTL's get_sql is just our own threshold
+            # and isn't re-polled, so don't seed gqrx_sql there).
             try:
-                self._set_ui(gqrx_sql=self.client.get_sql(),
-                             af=self.client.get_af())
+                if not is_rtl:
+                    self._set_ui(gqrx_sql=self.client.get_sql())
+                self._set_ui(af=self.client.get_af())
             except Exception:
                 pass
             try:
@@ -982,10 +985,25 @@ class Scanner:
             self.band_floor = results
         margin = self.get_cfg("auto_margin")
         self.log(f"Noise floor done. Auto squelch = floor + {margin:.0f} dB.")
-        # Reset banner/meter to idle so the calibration display doesn't linger.
-        self._set_ui(state="STOPPED", cur=None, msg="Noise floor updated",
-                     strength=-120.0, thresh=-100.0)
+        # Push the freshly-computed squelch to the backend and reflect it on the
+        # meter, so the new floor takes effect immediately even if we don't resume
+        # scanning (e.g. for manual listening). In auto mode the threshold is the
+        # current frequency's floor + margin.
         self._last_mode = self._last_sql = None
+        thr = None
+        try:
+            f = self.client.get_freq()
+            thr = self.effective_threshold(f)
+            self.client.set_sql(thr)
+            self._last_sql = thr
+            self.log(f"Squelch now {thr:.1f} dBFS @ {f/1e6:.4f} MHz "
+                     f"(floor {self.band_floor.get(band_index(f, self.bands), float('nan')):.1f} "
+                     f"+ {margin:.0f} dB)")
+        except Exception:
+            logger.debug("post-calibration squelch push failed", exc_info=True)
+        self._set_ui(state="STOPPED", cur=None, msg="Noise floor updated",
+                     strength=-120.0,
+                     thresh=thr if thr is not None else -100.0)
         if was_scanning:           # resume scanning if it was running
             self.run.set()
             self.log("Resuming scan after calibration")
@@ -1023,6 +1041,7 @@ class ScannerGUI:
         self.tree_iid = {}       # cid -> tree item id
         self.iid_cid = {}        # tree item id -> cid
         self._suppress_push = False   # guard: syncing slider FROM gqrx, don't push back
+        self._sql_user_t = 0.0        # last time the user moved the squelch (race guard)
         self._af_inited = False       # audio-gain slider initialised from gqrx yet?
         self._rf_inited = False       # RF/LNA-gain slider initialised yet?
         self._save_counter = 0        # autosave throttle (refresh ticks)
@@ -1685,6 +1704,7 @@ class ScannerGUI:
         # When the slider was moved programmatically to mirror GQRX, don't echo
         # it straight back (avoids a sync feedback loop).
         if not self._suppress_push:
+            self._sql_user_t = time.time()   # user-driven: hold off the GQRX mirror
             self.scanner.request("refresh_sql")
 
     def _apply_gain(self, _=None):
@@ -2227,7 +2247,12 @@ class ScannerGUI:
         if self.sql_mode.get() == "global":
             meter_thr = self.global_sql.get()
         else:
-            meter_thr = thr
+            # Auto mode: show the live floor+margin for the relevant frequency so
+            # the marker reflects the latest noise-floor calibration even while
+            # stopped (not the stale ui["thresh"]).
+            freq = tuned or (cur.get("freq") if cur else None)
+            meter_thr = (self.scanner.effective_threshold(freq)
+                         if freq is not None else thr)
         # Belt-and-suspenders: the blue readout must always match the slider value.
         self._gsql_label.config(text=f"{self.global_sql.get():.0f} dBFS")
         self.lbl_sig.config(text=f"{s:.1f} dBFS   (thr {meter_thr:.0f})")
@@ -2241,9 +2266,16 @@ class ScannerGUI:
         connected = self.client.connected and state != "DISCONNECTED"
         self.conn_dot.itemconfig(self._dot, fill=ACTIVE if connected else HOT)
 
-        # mirror GQRX's squelch into the global-squelch slider (two-way sync)
+        # Mirror GQRX's squelch into the global-squelch slider (two-way sync) —
+        # ONLY on the GQRX backend, where _maybe_poll_sql keeps gqrx_sql live. On
+        # the RTL backend gqrx_sql is just our own last-set threshold and is never
+        # re-polled, so mirroring it would perpetually drag the slider back to a
+        # stale value (the "jumps back to -50" bug). On RTL the slider IS the
+        # source of truth.
         gq = ui.get("gqrx_sql")
-        if (gq is not None and self.sql_mode.get() == "global"
+        if (self._backend_kind == "gqrx" and gq is not None
+                and self.sql_mode.get() == "global"
+                and time.time() - self._sql_user_t > 1.5
                 and abs(self.global_sql.get() - gq) > 0.6):
             self._suppress_push = True
             self.global_sql.set(round(gq, 1))
