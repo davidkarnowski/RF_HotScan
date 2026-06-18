@@ -1092,6 +1092,8 @@ class HeatmapView(tk.Frame):
         rows = []
         for y in range(self.H):
             vals = self.buf[y]
+            # Ensure vals is float32; nan_to_num fails on object/mixed dtype arrays
+            vals = np.asarray(vals, dtype=np.float32)
             if np.isnan(vals).all():
                 rows.append("{" + " ".join([BG] * self.Wd) + "}")
             else:

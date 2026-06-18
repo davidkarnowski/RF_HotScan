@@ -398,6 +398,9 @@ class RtlBackend:
         try:
             with self.lock:
                 self.sdr.center_freq = center
+            # PLL lock time: typically 20–50 ms for the R820T tuner. Wait before
+            # reading to avoid "PLL not locked" and missing/garbled audio.
+            time.sleep(0.1)
         except Exception as e:                       # dongle glitch -> give up audio
             self._audio_err = e
             self._playing = False
