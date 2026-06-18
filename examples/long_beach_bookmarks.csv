@@ -12,6 +12,7 @@ LBMH                ; #8b4513
 HAM                 ; #9acd32
 GMRS/FRS            ; #00e5ff
 NWS                 ; #87ceeb
+LASD                ; #8B0000
 
 # Frequency ; Name                     ; Modulation          ;  Bandwidth; Tags
    145180000; W6MPH Pasadena [PL 156.7 -0.6]                  ; Narrow FM           ;      16000; HAM
@@ -175,3 +176,39 @@ NWS                 ; #87ceeb
    162500000; NOAA Weather Radio Inland Empire (WXM66)          ; Narrow FM           ;      12500; NWS
    162525000; NOAA Weather Radio Avalon/Marine (WNG584)         ; Narrow FM           ;      12500; NWS
    162550000; NOAA Weather Radio LA County Primary (KWO37)      ; Narrow FM           ;      12500; NWS
+
+# Los Angeles County Sheriff Department (LASD) — LA-RICS Dispatch & Tactical
+# Dispatch Channels (Primary System)
+   483987500; LASD Disp 1 Crescenta Valley / Altadena           ; Narrow FM           ;      10000; LASD
+   483362500; LASD Disp 2 West Hollywood                        ; Narrow FM           ;      10000; LASD
+   483212500; LASD Disp 3 East Los Angeles                      ; Narrow FM           ;      10000; LASD
+   483262500; LASD Disp 4 Century                               ; Narrow FM           ;      10000; LASD
+   482862500; LASD Disp 5 Santa Clarita                         ; Narrow FM           ;      10000; LASD
+   482937500; LASD Disp 6 Walnut / San Dimas / Diamond Bar      ; Narrow FM           ;      10000; LASD
+   484037500; LASD Disp 7 Lomita / Avalon                       ; Narrow FM           ;      10000; LASD
+   483687500; LASD Disp 8 Industry                              ; Narrow FM           ;      10000; LASD
+   484162500; LASD Disp 9 Carson / Compton                      ; Narrow FM           ;      10000; LASD
+   482912500; LASD Disp 10 Malibu / Lost Hills                  ; Narrow FM           ;      10000; LASD
+   482987500; LASD Disp 11 Temple City                          ; Narrow FM           ;      10000; LASD
+   483437500; LASD Disp 12 South LA / Marina Del Rey            ; Narrow FM           ;      10000; LASD
+   483762500; LASD Disp 13 Norwalk / Pico Rivera                ; Narrow FM           ;      10000; LASD
+   483137500; LASD Disp 14 Lakewood / Cerritos                  ; Narrow FM           ;      10000; LASD
+   483037500; LASD Disp 15 Lancaster / Palmdale                 ; Narrow FM           ;      10000; LASD
+   484112500; LASD Lake Los Angeles / Bluerock / Antelope Valley; Narrow FM           ;      10000; LASD
+   483312500; LASD TSB Transit Services Bureau / College Safety ; Narrow FM           ;      10000; LASD
+   483537500; LASD SUD Special Units Dispatch                   ; Narrow FM           ;      10000; LASD
+
+# Local Tactical (L-TAC) Channels
+   476062500; LASD Compton Metro Supplemental Tac               ; Narrow FM           ;      10000; LASD
+   476187500; LASD Palmdale Metro Supplemental Tac              ; Narrow FM           ;      10000; LASD
+   476100000; LASD Parks Bureau Tac                             ; Narrow FM           ;      10000; LASD
+   476112500; LASD County Services Bureau - Civic Center        ; Narrow FM           ;      10000; LASD
+   476125000; LASD County Services Bureau - High Desert Regional ; Narrow FM           ;      10000; LASD
+   476150000; LASD County Services Bureau - Rancho Los Amigos   ; Narrow FM           ;      10000; LASD
+   476162500; LASD County Services Bureau - Olive View-UCLA     ; Narrow FM           ;      10000; LASD
+
+# Special Operations
+   483287500; LASD Emergency Trigger                            ; Narrow FM           ;      10000; LASD
+   478575000; LASD EOB 1 Portable Repeater                      ; Narrow FM           ;      10000; LASD
+   476050000; LASD SAR-1U Search and Rescue                     ; Narrow FM           ;      10000; LASD
+   482962500; LASD SUD RPT 1 Special Unit Portable Repeater 1   ; Narrow FM           ;      10000; LASD
