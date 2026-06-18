@@ -30,6 +30,17 @@ third-party dependencies** (standard library only).
 - **Priority channels** — flag one or more channels (★) that get checked on an
   interval even while parked elsewhere, and pre-empt the held channel.
 - **Lockout** — temporarily skip a chatty channel for the session.
+- **Radio playhead (manual tune + listen)** — an editable frequency field in the
+  banner, locked to the actually-tuned frequency, with **▶ Play / ⏹ Stop** and a
+  **● LIVE** indicator. Type any frequency (MHz or Hz) and listen, or
+  **double-click a station in the list to tune and hear it immediately**. Works
+  on the direct RTL-SDR backend (which demodulates its own audio); pauses the
+  scan while you listen.
+- **Per-transmission recording + transcription** (RTL backend) — optionally save
+  each transmission to a clean-cut WAV and transcribe it. Swappable STT engines:
+  **Parakeet-MLX** and **Whisper-MLX** locally, or **OpenAI** cloud
+  (gpt-4o-mini-transcribe / gpt-4o-transcribe / whisper-1) when `OPENAI_API_KEY`
+  is set. A live transcript pane lists transmissions with per-row playback.
 - **Auto-Noise-Floor** — samples empty in-band frequencies, measures the noise
   floor per band, and sets the squelch relative to the live RF environment.
   Scanning pauses and a clear `CALIBRATING` indicator shows RF HotScan driving
