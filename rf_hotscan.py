@@ -1273,6 +1273,7 @@ class ScannerGUI:
         return f, val
 
     def _build_taglist(self, parent):
+        # Header row: label + All/None buttons + count
         hdr = tk.Frame(parent, bg=BG)
         hdr.pack(fill="x")
         tk.Label(hdr, text="TAG FILTER (click to show/hide)", bg=BG, fg=MUTED,
@@ -1285,18 +1286,38 @@ class ScannerGUI:
         self.lbl_count = tk.Label(hdr, text="", bg=BG, fg=ACCENT,
                                   font=("Helvetica", 10, "bold"))
         self.lbl_count.pack(side="right", padx=(0, 10))
-        wrap = tk.Frame(parent, bg=BG)
-        wrap.pack(fill="x", pady=(2, 8))
+
+        # Calculate buttons per row: estimate ~70px per button, leaving ~200px for margins
+        # Typical window width is ~1000–1200px. Be conservative and assume ~900px available.
+        # Each button is roughly (len(tag) * 8 + 26) pixels (text + padding + borders).
+        # Add ~30px inter-button gap. Target 6–8 buttons per row.
+        estimated_width = 900
+        buttons_per_row = max(2, min(8, estimated_width // 120))  # ~120px per button incl. gap
+
+        # Build tag buttons across multiple rows
         enabled = self.scanner.get_cfg("enabled_tags")
-        for tag, color in self.tags.items():
+        tag_list = list(self.tags.items())
+        current_row = None
+
+        for i, (tag, color) in enumerate(tag_list):
+            # Create a new row frame every `buttons_per_row` buttons
+            if i % buttons_per_row == 0:
+                current_row = tk.Frame(parent, bg=BG)
+                current_row.pack(fill="x", pady=(2, 0))
+
+            # Create and pack the button
             on = tag in enabled
-            b = tk.Label(wrap, text=tag, bg=color if on else PANEL2,
+            b = tk.Label(current_row, text=tag, bg=color if on else PANEL2,
                          fg=contrast_fg(color) if on else color,
                          font=("Helvetica", 11, "bold"), padx=10, pady=4,
                          cursor="hand2")
             b.pack(side="left", padx=3)
             b.bind("<Button-1>", lambda e, t=tag: self._toggle_tag(t))
             self.tag_btns[tag] = b
+
+        # Add bottom padding after the last row
+        if tag_list:
+            tk.Frame(parent, bg=BG, height=1).pack(fill="x", pady=(0, 6))
 
     def _build_channel_list(self, parent):
         wrap = tk.Frame(parent, bg=BG)
