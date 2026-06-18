@@ -11,6 +11,7 @@ LBT                 ; #ff69b4
 LBMH                ; #8b4513
 HAM                 ; #9acd32
 GMRS/FRS            ; #00e5ff
+NWS                 ; #87ceeb
 
 # Frequency ; Name                     ; Modulation          ;  Bandwidth; Tags
    145180000; W6MPH Pasadena [PL 156.7 -0.6]                  ; Narrow FM           ;      16000; HAM
@@ -166,3 +167,11 @@ GMRS/FRS            ; #00e5ff
    508537500; LB Transit Bus Ops (DMR system)                 ; Narrow FM           ;      10000; LBT
    935225000; LBUSD Security / Emergency Radio Net [D023]     ; Narrow FM           ;      10000; LBUSD
    935225000; LBUSD School District Police [D026]             ; Narrow FM           ;      10000; LBUSD
+   162400000; NOAA Weather Radio San Diego County (KEC62)       ; Narrow FM           ;      12500; NWS
+   162400000; NOAA Weather Radio Coachella Valley (KIG78)       ; Narrow FM           ;      12500; NWS
+   162425000; NOAA Weather Radio Northern LA County (WNG659)    ; Narrow FM           ;      12500; NWS
+   162450000; NOAA Weather Radio Santa Ana Area (WWG21)         ; Narrow FM           ;      12500; NWS
+   162475000; NOAA Weather Radio Santa Barbara Marine (WWF62)   ; Narrow FM           ;      12500; NWS
+   162500000; NOAA Weather Radio Inland Empire (WXM66)          ; Narrow FM           ;      12500; NWS
+   162525000; NOAA Weather Radio Avalon/Marine (WNG584)         ; Narrow FM           ;      12500; NWS
+   162550000; NOAA Weather Radio LA County Primary (KWO37)      ; Narrow FM           ;      12500; NWS
