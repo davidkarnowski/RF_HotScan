@@ -29,17 +29,18 @@ Windows is out of scope.**
 ## 2. Git status
 
 - Branch: **`direct-sdr-backend`** (unmerged).
-- Last commit: **`3905a95`** — "feat: radio playhead — manual tune + listen".
+- Last commit: **`df0bdb6`** — "feat: draggable squelch marker, re-transcribe
+  button, panel-wide scroll".
 - Working tree: clean.
 
 ### Recent commits (newest first)
 | Hash | Message |
 |---|---|
+| `df0bdb6` | feat: draggable squelch marker, re-transcribe button, panel-wide scroll |
+| `4d7d74b` | feat: re-add Voxtral STT provider |
 | `3905a95` | feat: radio playhead — manual tune + listen with editable frequency |
-| `c65c1da` | docs: update STATE.md |
 | `0325014` | feat: LA County Sheriff (LASD) channels |
 | `657f761` | fix: RTL audio (PLL lock) + heatmap dtype |
-| `6ff8c38` | fix: unmute audio on double-click (superseded by the playhead) |
 | `94bffb2` | feat: NOAA Weather Radio (NWS) bookmarks |
 | `4169de1` | refactor: wrap tag filter buttons to multiple rows |
 
@@ -108,26 +109,29 @@ Banner widget: an **editable frequency field**, **▶ Play**, **⏹ Stop**, and 
 ## 7. STT subsystem (as wired today)
 
 `SttProvider` interface (`available`/`ensure_ready`/`warm_up`/`transcribe`).
-**Engines wired in `_PROVIDERS`:** `parakeet-mlx`, `whisper-mlx`, `openai`.
-- **Local:** Parakeet TDT v2 (default), Whisper-MLX (turbo/small).
+**Engines wired in `_PROVIDERS`:** `parakeet-mlx`, `whisper-mlx`, `voxtral`, `openai`.
+- **Local:** Parakeet TDT v2 (default), Voxtral Mini 3B, Whisper-MLX (turbo/small).
 - **Cloud (needs `OPENAI_API_KEY`):** gpt-4o-mini-transcribe, gpt-4o-transcribe,
   whisper-1.
 - `engine_options()` only returns engines whose deps + weights are present, so the
   GUI dropdown reflects what's actually installed.
 
-**On-disk weights right now:** `parakeet-tdt-0.6b-v2` (wired ✓) and
-`voxtral-mini-3b-4bit` (present but **not wired** — no provider class). Whisper
-weights were deleted to save space, so `whisper-mlx` won't appear until
-re-downloaded.
+**Currently listed (weights on disk):** Parakeet v2 + Voxtral Mini 3B (local) and
+the 3 OpenAI cloud models. Whisper-MLX is registered but **auto-hidden** — its
+weights were deleted to save space; re-download to use it.
 
-### Prior STT research (NOT wired into the app)
-An earlier evaluation (`dev/stt_eval/`, gitignored) benchmarked additional local
-models — **Voxtral Mini 3B, Vosk, Parakeet v3 (Canary)** — by WER on 20 clips.
-Findings: cloud Whisper-1/GPT-4o-mini led (~25%); Voxtral was the best *local*
-(28.9%) but ~1× realtime; Parakeet v2 was the fast live default (33.6%, ~35×
-realtime). **Provider classes for Voxtral/Vosk/Canary and a per-row
-re-transcribe (↻) button were prototyped in a prior session but never committed —
-they are NOT in the codebase.** Re-introducing them is open follow-up work.
+**Re-transcribe (↻):** each finalized transcript row has a ↻ button that re-runs
+that recording through the **currently-selected** model (changing the Model
+dropdown rebuilds the service). Pairs Parakeet (fast, live) with Voxtral (slower,
+more accurate) for an after-the-fact second pass.
+
+### Prior STT research
+An evaluation (`dev/stt_eval/`, gitignored) benchmarked local models by WER on 20
+clips: cloud Whisper-1/GPT-4o-mini led (~25%); **Voxtral best local (28.9%)** but
+~1× realtime; **Parakeet v2 fast live default (33.6%, ~35× realtime)**; Vosk and
+Parakeet v3 (Canary) were worse. Vosk/Canary provider classes were prototyped in a
+prior session but never committed and are **not** in the codebase (Voxtral has
+since been re-added).
 
 ---
 
@@ -139,8 +143,12 @@ CSULB, USCG, LBT, LBMH, HAM, GMRS/FRS. Plus:
 - **NWS** — NOAA Weather Radio, Southern California; 8 ch.
 - **LASD** — LA County Sheriff; ~28 ch (dispatch / local-tac / special ops).
 
-UI: tag-filter buttons wrap to multiple rows (`_build_taglist`, ~7/row) so they
-don't overflow; per-row ▶ play buttons in the transcript pane.
+UI: tag-filter buttons wrap to multiple rows (`_build_taglist`, ~7/row); per-row
+▶ play and ↻ re-transcribe buttons in the transcript pane; the signal-meter red
+squelch marker is **click-draggable** (sets the global squelch, switches to global
+mode, keeps marker/slider/readout aligned); wheel/two-finger scroll works anywhere
+over the control panel or station listing (`_on_mousewheel` bind_all router), not
+just on the scrollbar.
 
 ---
 
@@ -165,10 +173,11 @@ weights. Shared with GQRX: only `~/.config/gqrx/bookmarks.csv`. Gitignored:
 ## 11. Known issues / open work
 
 - **Branch `direct-sdr-backend` unmerged** — no PR yet.
-- **Uncommitted prior work lost:** Voxtral/Vosk/Canary provider classes + the ↻
-  re-transcribe button were prototyped but never committed; re-introduce if wanted.
-- Voxtral weights sit on disk unused until a provider class is wired.
 - Whisper-MLX weights were deleted for space; re-download to use that engine.
+- Vosk + Parakeet-v3 (Canary) providers are not wired (Voxtral was re-added); add
+  back only if disk space allows.
+- Playhead + draggable squelch + re-transcribe are committed but **not yet
+  live-tested with the dongle** — verify in the app.
 
 ---
 
