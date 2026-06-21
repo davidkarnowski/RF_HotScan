@@ -30,6 +30,17 @@ third-party dependencies** (standard library only).
 - **Priority channels** — flag one or more channels (★) that get checked on an
   interval even while parked elsewhere, and pre-empt the held channel.
 - **Lockout** — temporarily skip a chatty channel for the session.
+- **Radio playhead (manual tune + listen)** — an editable frequency field in the
+  banner, locked to the actually-tuned frequency, with **▶ Play / ⏹ Stop** and a
+  **● LIVE** indicator. Type any frequency (MHz or Hz) and listen, or
+  **double-click a station in the list to tune and hear it immediately**. Works
+  on the direct RTL-SDR backend (which demodulates its own audio); pauses the
+  scan while you listen.
+- **Per-transmission recording + transcription** (RTL backend) — optionally save
+  each transmission to a clean-cut WAV and transcribe it. Swappable STT engines:
+  **Parakeet-MLX** and **Whisper-MLX** locally, or **OpenAI** cloud
+  (gpt-4o-mini-transcribe / gpt-4o-transcribe / whisper-1) when `OPENAI_API_KEY`
+  is set. A live transcript pane lists transmissions with per-row playback.
 - **Auto-Noise-Floor** — samples empty in-band frequencies, measures the noise
   floor per band, and sets the squelch relative to the live RF environment.
   Scanning pauses and a clear `CALIBRATING` indicator shows RF HotScan driving
@@ -40,8 +51,13 @@ third-party dependencies** (standard library only).
 - **Live dBFS meter** with the active threshold marked, color-coded state
   (`SCANNING` / `HOLDING` / `CALIBRATING` / `DISCONNECTED`), and a connection
   indicator dot (green = reachable, red = not).
-- **Verbose, tailable log** at `~/.config/gqrx/scanner.log` for debugging and
+- **Verbose, tailable log** at `./scanner.log` for debugging and
   for AI agents to inspect scan behavior.
+- **RF activity heatmap** (second tab) — captures a time × frequency heatmap over
+  a band using **direct RTL-SDR control**, stores every sweep in SQLite
+  (re-renderable), flags active frequencies, and exports PNGs. Also drivable
+  headless via `python -m heatmap` for scripts/agents. See
+  [Heatmap](#heatmap-rf-activity-over-time).
 
 ---
 
@@ -73,6 +89,62 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
 
 ---
 
+## Heatmap (RF activity over time)
+
+A second tab, **Heatmap**, is the 2026 take on the classic `rtl_power` +
+`heatmap.py`: it sweeps a start→stop frequency range over a time window using
+**direct RTL-SDR control** and answers *what was transmitting, where, and when*
+across the band. (Implemented in `heatmap.py`, built on the direct
+`rtl_backend.RtlBackend`.)
+
+- **Direct dongle sweep** — tiles the range into ~2 MHz windows, FFTs each, and
+  stitches one full per-bin power row per sweep. Lots of knobs: start/stop,
+  sample rate, FFT bin width, gain/AGC, PPM, dwell, averaged blocks, crop %, hop
+  overlap, duration, activity margin, colormap.
+- **Every sweep persisted to SQLite** (`heatmap.sqlite`, one quantised power row
+  per sweep) so a heatmap can be **re-created offline, exactly** — re-render or
+  export a PNG from any past session.
+- **Activity detection** — a per-bin noise floor flags bins that key up, and
+  contiguous active bins are clustered into detected frequency ranges (with duty
+  %), so intermittent transmissions stand out from a constant floor.
+- **Live + polished views** — a fast pure-Tk waterfall during capture; a
+  matplotlib re-render (colormaps, colorbar, MHz/time axes, pan/zoom, PNG export)
+  for stored sessions.
+- **Opt-in raw IQ dumps** (`.cf32`) per window — manual or auto-on-activity.
+
+### Shared dongle
+
+The RTL dongle is single-owner. The Scanner (in RTL mode) and the Heatmap cannot
+hold it at once, so running a Heatmap capture **borrows the Scanner's connected
+backend and pauses the Scanner's scan for the duration of the capture**, then
+resumes it — tied to *running a capture*, not to switching tabs. If the Scanner
+is on the GQRX backend (or no dongle is connected), the Heatmap opens its own
+(quitting GQRX first). A second owner trying to open the dongle gets a clear
+error rather than a corrupted tune.
+
+### Headless / agent use
+
+The same engine runs without the GUI, for scripts or AI agents:
+
+```sh
+# capture 88–108 MHz for 10 s; print JSON (session id, detected ranges, ...)
+.venv/bin/python -m heatmap scan --start 88e6 --stop 108e6 --duration 10 \
+    --device 0 --gain auto --json
+.venv/bin/python -m heatmap render <session_id> --png out.png   # re-render a session
+.venv/bin/python -m heatmap list                                 # sessions as JSON
+.venv/bin/python -m heatmap info <session_id>                     # params + detected
+```
+
+`heatmap.run_scan(...)` is the equivalent Python API.
+
+> **Testing only:** `--device fake` selects a built-in *synthetic* source
+> (`FakeSweepSource`) that fabricates a deterministic spectrum with no dongle. It
+> exists solely for the test suite (`test_heatmap.py`) and no-hardware CI/dry
+> runs — it produces invented signals, not real RF, and is **not** offered in the
+> GUI. All operational paths (GUI and CLI) default to the real dongle (`0`).
+
+---
+
 ## Requirements
 
 - **GQRX 2.15+** (developed against 2.17.7) with a working SDR device.
@@ -81,7 +153,12 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
     version). Apple's `/usr/bin/python3` already ships Tkinter but with an older
     Tk that renders poorly on Retina displays.
   - Debian/Ubuntu: `sudo apt install python3-tk`.
-- No `pip` packages required.
+- No `pip` packages required for the GQRX scanner path.
+- **For the direct RTL-SDR backend and the Heatmap tab** (optional): `librtlsdr`
+  (`brew install rtl-sdr`) plus `numpy`, `scipy`, `pyrtlsdr`, `sounddevice`,
+  `matplotlib` in a project `.venv` — see
+  [`requirements-rtl.txt`](requirements-rtl.txt) or run `./setup_rtl_env.sh`.
+  Then launch with the venv interpreter (`.venv/bin/python rf_hotscan.py`).
 
 ---
 
@@ -98,8 +175,13 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
    [`examples/long_beach_bookmarks.csv`](examples/long_beach_bookmarks.csv).
 4. **Run it:**
    ```sh
-   python3 rf_hotscan.py
+   python3 rf_hotscan.py            # GQRX scanner path (stdlib only)
+   .venv/bin/python rf_hotscan.py   # + direct RTL-SDR backend & Heatmap tab
    ```
+   The window has two tabs: **Scanner** (GQRX / RTL bookmark scanner) and
+   **Heatmap** (RF activity heatmap — see [above](#heatmap-rf-activity-over-time)).
+   Run from the repo directory so it finds `heatmap.py` / `rtl_backend.py` /
+   `clock.py`.
 
 ### First-run workflow
 
@@ -115,6 +197,53 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the internals and
 RF HotScan does not maintain its own channel database — it reads **GQRX's
 bookmark file** (`~/.config/gqrx/bookmarks.csv`) directly, so anything you can
 bookmark in GQRX, the scanner can sweep.
+
+### Bundled sample: a whole-city monitoring set
+
+The repo ships a ready-to-use example at
+[`examples/long_beach_bookmarks.csv`](examples/long_beach_bookmarks.csv) — a
+**city-monitoring set** for Long Beach, CA, plus the surrounding amateur-radio
+landscape. Rather than a handful of random frequencies, it is organized to cover
+*one city's* conventional analog radio across its public agencies (and the local
+ham bands), so you can drop it in and immediately scan — or heatmap — what a whole
+city is saying on the air.
+
+- **153 channels across 12 tags** — 10 public-safety / civic agencies plus
+  amateur radio and GMRS/FRS — spanning VHF/UHF (≈145–935 MHz):
+
+  | Tag | Service | Tag | Service |
+  | --- | --- | --- | --- |
+  | `LBPD` | Police | `LBFD` | Fire / lifeguard / marine |
+  | `POLB` | Port of Long Beach | `USCG` | Coast Guard (harbor) |
+  | `LBC` | City gov / utilities / works | `LBT` | Transit |
+  | `LBUSD` | Unified School District | `CSULB` | Cal State Long Beach |
+  | `LBCC` | City College | `LBMH` | Memorial paramedic base-hospital |
+  | `HAM` | Amateur radio (2 m / 1.25 m / 70 cm) | `GMRS/FRS` | GMRS + FRS (462/467 MHz) |
+
+- **Tag-per-service, color-coded**, so you can filter the scan (or read the
+  heatmap) by service — watch just police + fire, just ham, GMRS/FRS, or
+  everything at once.
+- **Amateur radio (`HAM`)** — area 2 m / 1.25 m / 70 cm repeaters plus the
+  national **FM simplex calling** channels and the full 15 kHz **2 m simplex
+  grid** (146.520 national calling, 146.535, 146.550, … through 147.570).
+- **GMRS/FRS (`GMRS/FRS`)** — all 30 channels of the combined family-radio plan
+  with their **channel numbers**: FRS/GMRS channels 1–22 (462/467 MHz), the
+  FRS-only 0.5 W channels 8–14, and the eight GMRS repeater inputs 15R–22R.
+- **Tones carried in channel names** (`[D031]`, `[PL 151.4]`, repeater shifts like
+  `[-0.6]`) as a reference, and **analog FM only** (digital P25/DMR/NXDN are noted
+  but not demodulable).
+
+**Use it:** copy it into place as GQRX's bookmark file, then launch:
+
+```sh
+cp examples/long_beach_bookmarks.csv ~/.config/gqrx/bookmarks.csv
+```
+
+(If `~/.config/gqrx/bookmarks.csv` is absent, RF HotScan also falls back to a
+`bookmarks.csv` next to the app.) It is meant as a **template**: swap in your own
+city's agencies/frequencies following the same tag-per-agency, tone-in-name
+conventions — see [how it was built](#how-the-bundled-long-beach-bookmark-set-was-built)
+below.
 
 ### The bookmark file format
 
@@ -162,7 +291,18 @@ followed a few deliberate conventions:
   | `USCG` | Coast Guard Sector LA–Long Beach + harbor marine |
   | `LBT` | Long Beach Transit |
   | `LBMH` | Long Beach Memorial paramedic base-hospital channels |
+  | `HAM` | Amateur radio — area 2 m / 1.25 m / 70 cm repeaters + FM simplex |
+  | `GMRS/FRS` | GMRS + FRS combined — all 30 channels with channel numbers |
 
+- **Amateur radio (`HAM`).** Area repeaters carry their callsign and shift/tone
+  in the name (e.g. `K6CHE Long Beach [PL 156.7 +0.6]`); the FM simplex calling
+  channels and the full 15 kHz 2 m simplex grid (146.520 national calling →
+  147.570) are included per the ARRL band plan. Repeater **outputs** are listed
+  (what you hear); the `[±0.6]` / `[-5]` shift is reference only.
+- **GMRS/FRS (`GMRS/FRS`).** The full 30-channel FCC family-radio plan, each
+  channel named with its number (e.g. `FRS/GMRS Ch 1 (462.5625)`, `GMRS Ch 15R
+  Repeater Input (467.5500)`). FRS-only channels 8–14 are tagged as such; the
+  eight 467 MHz repeater inputs (15R–22R) pair with outputs 15–22 at +5 MHz.
 - **CTCSS/DPL tones embedded in the channel name** (e.g. `[D031]` = DPL 031,
   `[PL 151.4]` = 151.4 Hz CTCSS). GQRX bookmarks have no tone field, and the
   remote protocol can't gate on tone, so the tone is carried in the name as a
@@ -184,9 +324,13 @@ name, and let RF HotScan handle the rest.
 
 | Path | Purpose |
 | --- | --- |
-| `~/.config/gqrx/bookmarks.csv` | GQRX's bookmark file — the scan source (read-only to RF HotScan). |
-| `~/.config/gqrx/scanner.log` | Verbose, appendable activity log. `tail -f` it. |
-| `~/.config/gqrx/scanner_settings.json` | Persisted UI settings (tags, lockouts, disabled channels, sliders). |
+| `~/.config/gqrx/bookmarks.csv` | GQRX's bookmark file — the scan source (read-only; falls back to `./bookmarks.csv` if absent). |
+| `./scanner.log` | Verbose, appendable activity log next to the app. `tail -f` it. |
+| `./scanner_settings.json` | Persisted UI settings (tags, lockouts, disabled channels, sliders). |
+| `./recordings/` | Transmission WAVs + `recordings.sqlite` + `recordings.events.jsonl`. |
+| `./heatmap.sqlite` | Heatmap sessions + per-sweep power rows (re-renderable). |
+| `./heatmap.log` / `./heatmap.events.jsonl` | Heatmap verbose log + agent-readable JSONL event stream. |
+| `./iq/` | Opt-in raw IQ dumps (`.cf32`) from heatmap captures. |
 
 ---
 
@@ -205,6 +349,43 @@ name, and let RF HotScan handle the rest.
 
 ---
 
+## Dependencies & licenses
+
+The **GQRX scanner core** (`rf_hotscan.py`, `clock.py`, `recorder.py`'s metadata
+layer) uses only the Python standard library (Python + Tkinter, PSF license) — no
+third-party code is imported or redistributed by this repo.
+
+The **direct RTL-SDR backend and the Heatmap** are optional and rely on
+third-party runtime dependencies that *you* install (they are **not** bundled or
+redistributed here). Their licenses:
+
+| Dependency | Used for | License |
+| --- | --- | --- |
+| Python + Tkinter | runtime + GUI | PSF (permissive) |
+| numpy | FFT / array math | BSD-3-Clause |
+| scipy | DSP filters, Welch PSD | BSD-3-Clause |
+| matplotlib | heatmap render + PNG export | Matplotlib license (BSD-style, PSF-based) |
+| sounddevice | audio playback | MIT |
+| PortAudio (via sounddevice) | audio I/O | MIT-style |
+| **pyrtlsdr** | RTL-SDR Python binding | **GPL-3.0** |
+| **librtlsdr** / `rtl-sdr` | native USB driver | **GPL-2.0-or-later** |
+
+**Copyleft note (read before distributing binaries).** `pyrtlsdr` (GPL-3.0) and
+the native `librtlsdr` (GPL) are copyleft. This repository distributes **only its
+own source** and neither bundles nor links those libraries — they are installed
+separately by the user — so the project's own `LICENSE` can be chosen
+independently. However, **distributing a *combined* or packaged/binary work** that
+includes the RTL stack (e.g. a frozen app, a wheel vendoring these libs) would
+place that combined work under the GPL. The stdlib-only GQRX path carries no such
+obligation. Keep the RTL backend an optional, separately-installed component, and
+pick the project license below with this in mind.
+
+Each dependency remains under its own license; installing them (e.g. via
+[`requirements-rtl.txt`](requirements-rtl.txt)) is your acceptance of those terms.
+
+---
+
 ## License
 
-License TBD before public release.
+License TBD before public release. See **Dependencies & licenses** above for the
+copyleft implications of the optional RTL stack when choosing it.

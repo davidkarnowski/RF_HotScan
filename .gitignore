@@ -1,3 +1,8 @@
+# Secrets — NEVER commit. API keys (OpenAI, HuggingFace, …) live here.
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -8,9 +13,17 @@ venv/
 # macOS
 .DS_Store
 
-# Runtime artifacts (live in ~/.config/gqrx, not the repo — listed for clarity)
+# Runtime artifacts (live next to the app, not ~/.config/gqrx)
 scanner.log
 scanner_settings.json
+/recordings/
+# Heatmap runtime data
+heatmap.log
+heatmap.sqlite
+heatmap.sqlite-*
+heatmap.events.jsonl
+heatmap_settings.json
+/iq/
 
 # Third-party reference material is NOT redistributed here (copyright).
 # Keep frequency-reference PDFs/exports local-only.
@@ -20,3 +33,6 @@ reference/
 
 # Local-only development notes, screenshots and progress log (maintainer/agents)
 /dev/
+
+# Locally-downloaded STT model weights (not redistributed)
+.models/

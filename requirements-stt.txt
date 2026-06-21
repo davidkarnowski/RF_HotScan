@@ -1,0 +1,23 @@
+# Optional speech-to-text for transmission recordings (stt.py).
+# Neither the GQRX scanner nor the RTL backend need this — only the
+# "Transcribe recordings" toggle does. macOS/Linux (Apple Silicon recommended).
+#
+#   .venv/bin/pip install -r requirements-stt.txt
+#
+# The SttProvider interface in stt.py keeps the engine swappable; the GUI "Model"
+# dropdown lists whichever of these are actually installed/cached/credentialed.
+#
+# LOCAL engines (offline, no audio leaves the machine):
+#   - Parakeet-TDT  (mlx-community/parakeet-tdt-0.6b-v2) — fastest, English.
+#   - Whisper (MLX) (mlx-community/whisper-large-v3-turbo, …) — more robust on
+#     noisy/garbled radio traffic; pick the model in the dropdown.
+# Models download into the HuggingFace cache (~0.6–1.6 GB each) on first use.
+parakeet-mlx>=0.5      # pulls mlx (Apple Silicon Metal) + librosa
+mlx-whisper>=0.4       # Whisper on MLX; download a model, e.g.:
+                       #   .venv/bin/python -c "import mlx_whisper as m; \
+                       #     m.transcribe('any.wav', path_or_hf_repo='mlx-community/whisper-large-v3-turbo')"
+
+# CLOUD engine (audio is uploaded to OpenAI — NOT local/offline):
+#   Selectable models: gpt-4o-mini-transcribe, gpt-4o-transcribe, whisper-1.
+#   Needs OPENAI_API_KEY in the environment.
+openai>=1.40           # optional; only if you want the OpenAI cloud option
