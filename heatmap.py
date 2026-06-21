@@ -1097,7 +1097,7 @@ class HeatmapView(tk.Frame):
             if np.isnan(vals).all():
                 rows.append("{" + " ".join([BG] * self.Wd) + "}")
             else:
-                v = np.nan_to_num(vals, nan=self.dmin)
+                v = np.nan_to_num(vals, nan=self._eff()[0])
                 rows.append("{" + " ".join(self._row_colors(v)) + "}")
         try:
             self.photo.put(" ".join(rows), to=(0, 0))
