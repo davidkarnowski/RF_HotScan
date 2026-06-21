@@ -36,3 +36,15 @@ reference/
 
 # Locally-downloaded STT model weights (not redistributed)
 .models/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# SSH / crypto keys (safety net — should never be here)
+*.pem
+*.key
+id_rsa*
+id_ed25519*
