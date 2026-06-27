@@ -1,85 +1,286 @@
-# RF HotScan — Notes for AI Agents
+# RF HotScan — Agent Guide
 
-This file orients an AI coding agent (or any new contributor) working on RF HotScan. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first for the design; this file is about *how to work on it productively and safely*.
+Modular Python/Tkinter bookmark scanner for RTL-SDR dongles (primary) with legacy GQRX TCP fallback.
+Audio recorder, speech-to-text transcriber, and wideband heatmap — all in one app.
 
-## What this project is
+| Module | Lines | Role |
+|---|---|---|
+| `rf_hotscan.py` | 2 745 | GUI + scanner engine + GqrxClient |
+| `rtl_backend.py` | 730 | Direct RTL-SDR backend (pyrtlsdr) |
+| `heatmap.py` | 1 713 | Wideband sweep, DB, detection, rendering |
+| `recorder.py` | 307 | WAV squelch-gated recorder |
+| `stt.py` | 581 | Speech-to-text providers + TranscriptionService |
+| `player.py` | 160 | Audio playback |
+| `clock.py` | 51 | Single time-source (stdlib only) |
+| `test_heatmap.py` | 230 | Heatmap unit tests |
 
-A modular Python/Tkinter application that acts as a direct RTL-SDR bookmark scanner, audio recorder, and speech-to-text transcriber, with a legacy TCP fallback mode to drive GQRX. 
+---
 
 ## Ground truth: read these signals, don't guess
 
-- **The verbose log** is your primary observability tool:
-  `./scanner.log` (next to the app). It records every frequency hop
-  (`HOP #n freq tag s=<dBFS> thr=<dBFS> ** ACTIVE **`), state transitions
-  (`STATE x -> y`), holds, action processing, squelch read-backs, and full tracebacks on error.
-  Tail it while reproducing:
-  ```sh
-  tail -f scanner.log    # in the app dir
-  ```
-  A robust pattern for headless observation: record the current line count, run/repro, then read only the new lines.
-- **The GUI log pane** shows the same events at INFO level (no per-hop spam).
+The scanner writes **`scanner.log`** (rotating, always-on).
+Tail it for real-time observation without touching the GUI:
 
-## Verifying behavior WITHOUT clicking the GUI
-
-The engine (`Scanner`) can be driven headlessly — this is the fastest way to reproduce and confirm a fix. The GUI just calls these same methods.
-
-```python
-import time, rf_hotscan as g              # run from the repo dir
-tags, chans = g.load_bookmarks(g.BOOKMARKS)
-for i, c in enumerate(chans):             # the GUI assigns cid; do the same
-    c["cid"] = i
-bands = g.cluster_bands(chans)
-# Swap with rtl_backend.RtlBackend() to test the direct backend
-client = g.GqrxClient() 
-sc = g.Scanner(client, tags, chans, bands)
-sc.request("reconnect"); time.sleep(0.6)  # connect
-sc.set_cfg(enabled_tags={"LBPD"}, squelch_mode="global", global_sql=-30.0)
-sc.run.set()                              # == pressing Start
-time.sleep(3)
-print(sc.snapshot_ui()["state"], sc._hops)
-sc.run.clear(); sc.alive = False; client.close()
+```bash
+tail -f scanner.log
 ```
 
-You can also build the GUI headlessly to test widget logic without a long-lived window:
-
-```python
-import tkinter as tk, rf_hotscan as g
-root = tk.Tk(); gui = g.ScannerGUI(root); root.update_idletasks()
-gui._toggle_tag("LBPD"); root.update_idletasks()
-print(len(gui.tree.get_children("")))     # visible rows
-root.destroy()
-```
-
-To smoke-test the full window without it lingering, schedule a destroy:
-`root.after(2500, root.destroy); root.mainloop()`.
+The GUI also has a **Log pane** that mirrors the same stream.
+For headless or CI work, the log file is the primary observation channel.
 
 ---
 
-## Hard invariants — do not break these
+## Verifying behaviour WITHOUT clicking the GUI
 
-1. **Only the engine thread touches the backend or socket.** From the GUI, mutate state via `scanner.set_cfg(...)`, fire work via `scanner.request(name, **kw)`, and use the `run`/`skip` Events.
-2. **Key per-channel state by `cid`, never by frequency.** Duplicate-frequency bookmarks exist. Frequency keys silently collide.
-3. **Keep the scan hot-path lean:** one tune + one power/strength read per hop. Put verification steps at transitions, not in the hot loop.
-4. **The scan thread must never die silently.** Keep the broad `except` in `_loop()` that logs a traceback and continues.
-5. **Detection is level-only.** No tone (CTCSS/DPL) gating is available via the hardware sweeps or remote protocols. Tones live in channel names as reference only.
-6. **`cfg`/`ui` access goes through the lock** (`set_cfg`/`get_cfg`/`_set_ui`/`snapshot_ui`). Don't read or mutate those dicts directly across threads.
+### Headless engine smoke-test
+
+```python
+from rf_hotscan import ScanEngine, ScanConfig
+cfg = ScanConfig(...)
+eng = ScanEngine(cfg)
+eng.start()
+# ... observe scanner.log ...
+eng.stop()
+```
+
+### Headless GUI smoke-test (Tk opens then closes)
+
+```python
+import tkinter as tk
+root = tk.Tk()
+# build app …
+root.after(2500, root.destroy)
+root.mainloop()
+```
 
 ---
 
-## Backends & RTL-SDR Invariants
+## Probing GQRX directly
 
-- **`RtlBackend`** (in `rtl_backend.py`) — direct dongle via pyrtlsdr. Implements `sweep()` (so `Scanner._sweep_pass` runs, ~35–77 ch/s) and streams audio on `on_hold` via `FMDemod`.
-- **`GqrxClient`** (in `rf_hotscan.py`) — GQRX remote client fallback.
-- **Run from the project `.venv`** (`.venv/bin/python rf_hotscan.py`) to run with direct RTL support.
+GQRX must have **Tools → Remote control** enabled.
+Open a raw TCP socket to `127.0.0.1:7356`:
 
-### Shared-dongle invariant (CRITICAL)
-The RTL dongle is a **single-owner USB device.**
-- Only one of {GQRX running, RtlBackend connected, heatmap sweeping} may hold the dongle at once.
-- **This is enforced** by a process-wide owner in `rtl_backend.py`: `connect()` calls `_acquire_dongle(self, owner_label)` and `close()` releases it; a second owner trying to open the dongle raises `DongleBusy`.
-- **Borrow + auto-pause (in-app coordination).** When both tabs live in one process, a Heatmap capture does NOT open a second dongle: `SdrShareCoordinator` (in `rf_hotscan.py`) lends the Scanner's already-connected `RtlBackend` to the heatmap and pauses the Scanner's scan + audio (`run.clear()` + `on_resume()`) for the duration of the capture.
-- **Never call `cancel_read_async()` on an idle dongle** — it corrupts the next `center_freq` (LIBUSB_ERROR_IO). Guard with the `_streaming` flag.
+```
+$ nc 127.0.0.1 7356
+f            ← get frequency
+F 154600000  ← set frequency
+l STRENGTH   ← read signal strength (dBFS)
+```
 
-### Audio squelch-gating + transmission recording (RTL only)
-- `RtlBackend.on_hold(ch, thr)` receives the channel dict + its squelch threshold. In `listen`'s `iq_cb`, `open_ = live_power >= thr - SQUELCH_HYST` is the single "signal present" decision.
-- `recorder.py`: `WavRecorder` writes mono WAVs with CLEAN CUTS — only `open_` blocks are written, so the WAV ends immediately at the signal drop.
-- GQRX backend has no audio sample access, so recording/playback/STT features are disabled when GQRX backend is selected.
+Useful discovery commands:
+
+| Command | Purpose |
+|---|---|
+| `l ?` | List supported *get* levels |
+| `L ?` | List supported *set* levels |
+| `_` | Return GQRX version string |
+
+Known levels on GQRX 2.17.x: **STRENGTH** (read-only), **SQL**, **AF**, **LNA_GAIN**.
+
+> There is no remote command to read bookmarks — RF HotScan parses the GQRX CSV bookmark file directly.
+
+---
+
+## Hard invariants
+
+1. **Only the engine thread touches the backend/socket.**
+   GUI communicates via `set_cfg` / `request` / `Events`.
+2. **Key by `cid`, not frequency.**
+   Multiple bookmarks can share a frequency.
+3. **Scan hot-path is lean:** one tune + one strength read per hop.
+4. **Scan thread never dies silently** — unhandled exceptions are caught, logged, and surfaced.
+5. **Detection is level-only** — no tone/digital decode in the scan loop.
+6. **`cfg` / UI access goes through the lock.**
+
+---
+
+## Gotchas
+
+- **`get_mode` (`m`) returns TWO lines** (mode then passband).
+  Use `_cmd(..., 2)` to consume both.
+- **AF gain clamps to −80 … +50 dB**; SQL and STRENGTH are dBFS (≈ −100 noise … 0).
+- **Slider feedback loops:** programmatically moving a Tk slider can trigger its
+  `command` callback. `_suppress_push` guards GQRX→GUI syncs. Preserve that pattern.
+- **Disabled-channel persistence** uses a `freq:name` signature, not `cid`,
+  so the selection survives bookmark edits. Keep that mapping in `_load/_save_settings`.
+- **Big frequency hops** (across bands) re-centre the SDR hardware;
+  `_tune` adds ≈150 ms settle when `band_index` changes.
+
+---
+
+## Backends & RTL-SDR
+
+Two backends, selected via **BACKEND** radio buttons in the GUI.
+The scanner holds `self.client` and calls a fixed interface:
+
+| Method | Direction | Notes |
+|---|---|---|
+| `connect` / `close` / `connected` | lifecycle | |
+| `set_freq` / `get_freq` | tune | |
+| `set_mode` / `get_mode` | demod mode | |
+| `strength` | read | returns dBFS |
+| `get_sql` / `set_sql` | squelch | |
+| `get_af` / `set_af` | audio gain | |
+| `get_lna` / `set_lna` | RF gain | |
+| `on_hold(ch, thr)` / `on_resume()` | optional | audio squelch-gate |
+| `sweep(freqs)` → `({freq:dbfs}, nwin)` | optional | wideband scan |
+| `recommended_settle_ms` | property | GqrxClient=350, RtlBackend=30 |
+
+### GqrxClient (`rf_hotscan.py`)
+
+Stdlib-only, rigctl TCP to `HOST=127.0.0.1`, `PORT=7356`.
+No audio samples, no recording capability.
+
+### RtlBackend (`rtl_backend.py`)
+
+Direct dongle via **pyrtlsdr**. Provides `sweep()` and FM-demod audio on `on_hold`.
+Constants: `SAMPLE_RATE=2_400_000`, `USABLE_BW=2_000_000`, `DC_GUARD=30_000`,
+`channel_bw=12_500` (fixed), `SQUELCH_HYST=2.5` dB.
+
+Run from `.venv` for RTL; bare `python3` runs the GQRX path only (`RTL_AVAILABLE=False`).
+
+---
+
+## Shared-dongle invariant (CRITICAL)
+
+The RTL-SDR is a **single-owner USB device**.
+Only one consumer can hold the dongle at a time.
+
+- `_acquire_dongle` / `_release_dongle` enforce exclusive access.
+- `DongleBusy` exception is raised on contention.
+- `SdrShareCoordinator` provides `borrow` + auto-pause for cooperative sharing
+  (e.g., scanner pauses while heatmap sweeps).
+- **`cancel_read_async` pitfall:** calling it from the wrong thread can deadlock
+  or silently fail. Always cancel from the reader thread's context.
+
+---
+
+## dBFS scale convention
+
+`channel_power_dbfs(iq, fs, offset_hz, bw)` is **the one level measure** used by:
+
+- sweep detection
+- per-channel reads
+- live hold level display
+
+`window_power_dbfs` (heatmap) is PSD-based and on a **different scale**.
+Thresholds do not transfer between differently-scaled measures.
+If adding another level source, keep it on a comparable scale or document the offset.
+
+---
+
+## Time base — use `clock.py` everywhere
+
+`clock.py` is the single time source shared by scanner, heatmap, and recorder.
+
+| Function | Returns |
+|---|---|
+| `now_unix()` | UTC epoch float |
+| `mono()` | monotonic clock (for durations) |
+| `utc_iso(t)` / `local_iso(t)` | ISO string from epoch |
+| `now_iso()` | current time as ISO |
+| `file_stamp(t)` | filename-safe timestamp |
+
+**Rules:**
+- Persist **UTC epoch**; derive ISO for display.
+- Durations from sample counts or `mono()` deltas.
+- Heatmap stamps each power frame with `t_unix` + `t_dur_ms` + `iso` in `emit_event`.
+
+---
+
+## Audio squelch-gating + recording
+
+`RtlBackend.on_hold(ch, thr)` starts FM demod and squelch-gating.
+Gate logic: `open_ = live_power >= thr - SQUELCH_HYST`.
+
+`recorder.py` (`WavRecorder`): clean-cut WAV files at `SAMPLERATE=48000`.
+`CLOSE_CONFIRM_S=0.35` — gate must stay closed this long before ending a file.
+`MIN_DUR_S=0.25` — recordings shorter than this are discarded.
+
+GQRX backend: no audio samples available, no recording.
+
+---
+
+## Speech-to-text (`stt.py`, optional)
+
+### Provider interface
+
+Every provider implements: `available` / `ensure_ready` / `warm_up` / `transcribe`.
+
+| Key | Provider | Notes |
+|---|---|---|
+| `parakeet-mlx` | `ParakeetMLXProvider` | Default. MLX JIT, English only. Model: `mlx-community/parakeet-tdt-0.6b-v2` |
+| `whisper-mlx` | `MLXWhisperProvider` | Local. Checks HF cache for weights. Models: `large-v3-turbo`, `medium`, `small` |
+| `voxtral` | `VoxtralMLXProvider` | Audio LLM, ≈1× realtime |
+| `openai` | `OpenAIProvider` | Cloud, needs API key. Model: `gpt-4o-mini-transcribe`. Also: `gpt-4o-transcribe`, `whisper-1` |
+
+Registry: `_PROVIDERS` dict. Auto-order: `_AUTO_ORDER = ["parakeet-mlx", "whisper-mlx", "voxtral", "openai"]`.
+
+API: `make_provider(prefer="auto", model=None)`, `available_providers()`, `engine_options()`.
+
+### TranscriptionService
+
+Off-thread worker fed by a bounded queue. Target sample rate: `TARGET_SR=16000`.
+States: `loading` → `idle` → `transcribing` → (back to `idle` or `error`).
+`warm_up()` runs once on start (MLX JIT compile).
+Filters junk transcriptions, writes results to `RecordingsDB`, emits via `transcriptq` → GUI **Transcripts** pane.
+
+`WavRecorder.on_record(meta)` feeds completed recordings into the service.
+
+---
+
+## Heatmap (`heatmap.py`)
+
+Second tab in the GUI **and** a standalone CLI module.
+
+### Pipeline
+
+`SweepConfig` → `SweepSource` (`RtlSweepSource` or `FakeSweepSource`) →
+per-window Welch FFT → crop (`crop=0.20`) / DC-null → stitch → one dBFS row per sweep.
+
+`HeatmapRecorder` engine thread (same shape as the scanner engine).
+Default: `bin_hz=3000`, `duration_s=30`.
+
+### HeatmapDB (SQLite WAL)
+
+Tables: `sessions`, `power`, `activity`, `iq_dumps`.
+Power rows are quantized `uint8`; `load_matrix` reconstructs the full array.
+
+### Activity detection
+
+Per-bin min-hold-with-leak floor. Row > floor + margin → active.
+Contiguous active bins are clustered into activity events.
+
+### Rendering
+
+Live Tk canvas + offline matplotlib export.
+
+### Scale caveat
+
+`window_power_dbfs` ≠ `channel_power_dbfs` — see [dBFS scale convention](#dbfs-scale-convention).
+
+### CLI
+
+```bash
+python -m heatmap scan|render|list|info   # outputs JSON
+```
+
+`FakeSweepSource` is **testing only** (synthetic data).
+
+### Verification
+
+```bash
+.venv/bin/python test_heatmap.py
+```
+
+Shared dongle rules apply — see [shared-dongle invariant](#shared-dongle-invariant-critical).
+
+`APP_VERSION = "heatmap-1.0"`.
+
+---
+
+## Things intentionally NOT done
+
+- **No tone squelch** (CTCSS/DPL) — GQRX remote limitation; RTL backend could add it (planned).
+- **No P25/DMR/NXDN demodulation.**
+- **No writing to GQRX's bookmark file** — RF HotScan reads it, never edits it.

@@ -19,12 +19,13 @@ Target platforms: **macOS (Apple Silicon) primary, Linux/Ubuntu secondary. Windo
 ## 2. Git status
 
 - Branch: **`main`** (fully merged, in sync with GitHub private remote).
-- Last commit: **`5bfc6ba`** — "chore: harden .gitignore (IDE, editor, crypto key patterns)"
+- Last commit: **`c7fe0ff`** — "docs: update documentation to reflect raw RTL-SDR backend focus and merged main branch"
 - Working tree: clean.
 
 ### Recent commits (newest first)
 | Hash | Message |
 |---|---|
+| `c7fe0ff` | docs: update documentation to reflect raw RTL-SDR backend focus and merged main branch |
 | `5bfc6ba` | chore: harden .gitignore (IDE, editor, crypto key patterns) |
 | `076f244` | merge: direct-sdr-backend — RTL backend, heatmap, recording, STT, playhead |
 | `88deb51` | fix: heatmap crash on second session start (nan_to_num with None dmin) |
@@ -53,7 +54,7 @@ Target platforms: **macOS (Apple Silicon) primary, Linux/Ubuntu secondary. Windo
 | `rf_hotscan.py` | Main app: `Scanner` engine, `GqrxClient`, `ScannerGUI`, bookmarks, squelch/noise-floor, multi-row tag filters, **radio playhead**, transcript pane + recording playback |
 | `rtl_backend.py` | `RtlBackend`: dongle control, channelized sweep, `FMDemod`, squelch-gated audio + playback (`on_hold`/`listen`/`play_async`), recorder hooks |
 | `recorder.py` | `WavRecorder` (clean-cut per-transmission WAV) + `RecordingsDB` (SQLite) |
-| `stt.py` | `SttProvider` interface + **3 engine families (Parakeet-MLX, Whisper-MLX, OpenAI)**; `TranscriptionService` worker; `.env` loader |
+| `stt.py` | `SttProvider` interface + **4 engine families (Parakeet-MLX, Whisper-MLX, Voxtral, OpenAI)**; `TranscriptionService` worker; `.env` loader |
 | `player.py` | `WavPlayer`: async playback on the OS default device, independent of the SDR |
 | `clock.py` | Shared time base: UTC epoch persisted, ISO-8601 rendered |
 | `heatmap.py` | Spectrum capture/heatmap (separate tab; SQLite + JSONL) |
