@@ -56,8 +56,10 @@ except Exception:
 # Transmission playback (stdlib + lazy sounddevice). Independent of the SDR.
 try:
     import player
+    PLAYER_AVAILABLE = True
 except Exception:
     player = None
+    PLAYER_AVAILABLE = False
 
 # The app keeps its own runtime files (log, settings, recordings) next to itself,
 # not in ~/.config/gqrx — direct SDR is the primary path. Only the bookmark file
@@ -1012,6 +1014,170 @@ class Scanner:
 # --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
+class RecordingsView:
+    def __init__(self, parent):
+        self.parent = parent
+        try:
+            import recorder
+            self.db = recorder.RecordingsDB()
+        except Exception:
+            self.db = None
+        self.player = player.WavPlayer() if player else None
+        self.current_rec = None
+        
+        top_frame = ttk.Frame(parent)
+        top_frame.pack(side="top", fill="x", padx=5, pady=5)
+        
+        ttk.Button(top_frame, text="↻ Refresh", command=self.load).pack(side="left")
+        self.btn_play = ttk.Button(top_frame, text="▶ Play", command=self.toggle_play)
+        self.btn_play.pack(side="left", padx=5)
+        ttk.Button(top_frame, text="⏹ Stop", command=self.stop_playback).pack(side="left")
+        
+        self.progress = ttk.Progressbar(top_frame, orient="horizontal", length=200, mode="determinate")
+        self.progress.pack(side="left", padx=10)
+        
+        self.status_lbl = tk.Label(top_frame, text="Ready", bg=BG, fg=FG)
+        self.status_lbl.pack(side="left", padx=5)
+        
+        self.tree = ttk.Treeview(parent, columns=("time", "tag", "channel", "dur", "stt_eng", "transcript", "heal_eng", "healed"), show="headings")
+        self.tree.heading("time", text="Time (UTC)")
+        self.tree.heading("tag", text="Tag")
+        self.tree.heading("channel", text="Channel")
+        self.tree.heading("dur", text="Dur")
+        self.tree.heading("stt_eng", text="STT Engine")
+        self.tree.heading("transcript", text="Raw STT")
+        self.tree.heading("heal_eng", text="Healer")
+        self.tree.heading("healed", text="Healed STT")
+        
+        self.tree.column("time", width=140)
+        self.tree.column("tag", width=60)
+        self.tree.column("channel", width=150)
+        self.tree.column("dur", width=50)
+        self.tree.column("stt_eng", width=100)
+        self.tree.column("transcript", width=250)
+        self.tree.column("heal_eng", width=100)
+        self.tree.column("healed", width=250)
+        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Double-1>", self.on_double_click)
+        
+        self.detail_text = tk.Text(parent, height=8, bg=BG, fg=FG, wrap="word", borderwidth=0)
+        self.detail_text.pack(fill="x", padx=5, pady=5)
+        
+        self.load()
+        self._update_playback()
+
+    def load(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        if not self.db: return
+        recs = self.db.list(limit=300)
+        for r in recs:
+            t_str = r.get("iso_start", "")
+            if "T" in t_str:
+                t_str = t_str.replace("T", " ").split(".")[0] + " UTC"
+            self.tree.insert("", "end", iid=r["id"], values=(
+                t_str, r.get("tag", ""), r.get("name", ""), f"{r.get('duration_s', 0):.1f}s",
+                r.get("transcript_engine", ""), r.get("transcript", ""),
+                r.get("healed_by_engine", ""), r.get("healed_transcript", "")
+            ))
+
+    def on_select(self, event):
+        sel = self.tree.selection()
+        if not sel: return
+        rec = self.db.get(sel[0])
+        if not rec: return
+        self.detail_text.delete("1.0", "end")
+        
+        stt_eng = rec.get("transcript_engine") or "None"
+        self.detail_text.insert("end", f"--- RAW STT ({stt_eng}) ---\n")
+        self.detail_text.insert("end", (rec.get("transcript") or "") + "\n\n")
+        
+        heal_eng = rec.get("healed_by_engine") or "None"
+        self.detail_text.insert("end", f"--- HEALED STT ({heal_eng}) ---\n")
+        self.detail_text.insert("end", (rec.get("healed_transcript") or ""))
+
+    def on_double_click(self, event):
+        col = self.tree.identify_column(event.x)
+        if col == "#8":
+            self.edit_healed()
+        else:
+            self.play_selected()
+
+    def edit_healed(self):
+        sel = self.tree.selection()
+        if not sel: return
+        item = sel[0]
+        rec = self.db.get(item)
+        if not rec: return
+        
+        bbox = self.tree.bbox(item, column="#8")
+        if not bbox: return
+        
+        x, y, w, h = bbox
+        entry = tk.Entry(self.tree)
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.insert(0, rec.get("healed_transcript") or "")
+        entry.focus()
+        
+        def save_edit(e):
+            new_text = entry.get()
+            if self.db:
+                self.db.set_transcript(item, healed_transcript=new_text)
+            entry.destroy()
+            self.load()
+            try:
+                self.tree.selection_set(item)
+                self.on_select(None)
+            except Exception:
+                pass
+                
+        entry.bind("<Return>", save_edit)
+        entry.bind("<Escape>", lambda e: entry.destroy())
+        entry.bind("<FocusOut>", lambda e: entry.destroy())
+
+    def toggle_play(self):
+        if not self.player: return
+        if self.player.state == "playing":
+            self.player.pause()
+        elif self.player.state == "paused":
+            self.player.pause() # toggles resume
+        else:
+            self.play_selected()
+
+    def play_selected(self):
+        sel = self.tree.selection()
+        if not sel or not self.player: return
+        rec = self.db.get(sel[0])
+        if rec and rec.get("wav_path"):
+            self.current_rec = rec
+            self.player.play(rec["wav_path"])
+
+    def stop_playback(self):
+        if self.player:
+            self.player.stop()
+            self.current_rec = None
+
+    def _update_playback(self):
+        if self.player:
+            state = self.player.state
+            prog = self.player.progress
+            if state == "playing":
+                self.btn_play.config(text="⏸ Pause")
+                self.progress["value"] = prog * 100
+                if self.current_rec:
+                    dur = self.current_rec.get("duration_s", 0)
+                    t_str = self.current_rec.get("iso_start", "").replace("T", " ").split(".")[0] + " UTC"
+                    self.status_lbl.config(text=f"Playing: {t_str} [{prog*dur:.1f}s / {dur:.1f}s]")
+            elif state == "paused":
+                self.btn_play.config(text="▶ Resume")
+                self.status_lbl.config(text="Paused")
+            else:
+                self.btn_play.config(text="▶ Play")
+                self.progress["value"] = 0
+                self.status_lbl.config(text="Ready")
+        self.parent.after(100, self._update_playback)
+
 class ScannerGUI:
     def __init__(self, root, container=None):
         self.root = root
@@ -2728,6 +2894,10 @@ def main():
     scan_tab = ttk.Frame(nb)
     nb.add(scan_tab, text="  Scanner  ")
     app = ScannerGUI(root, container=scan_tab)  # applies the dark ttk theme
+
+    rec_tab = ttk.Frame(nb)
+    nb.add(rec_tab, text="  Recordings  ")
+    rec_view = RecordingsView(rec_tab)
 
     # Heatmap tab — additive; degrades gracefully if its (lazy) deps are absent.
     try:

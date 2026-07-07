@@ -62,7 +62,8 @@ CREATE INDEX IF NOT EXISTS ix_rec_freq  ON recordings(freq_hz);
 
 # additive columns for DBs created before STT existed (guarded migration)
 _MIGRATE = ("transcript TEXT", "transcript_engine TEXT", "transcript_model TEXT",
-            "transcript_rt REAL", "transcribed_at REAL")
+            "transcript_rt REAL", "transcribed_at REAL",
+            "healed_transcript TEXT", "healed_by_engine TEXT", "healed_at REAL")
 
 _REC_COLS = ("id", "unix_start", "unix_stop", "iso_start", "iso_stop",
              "duration_s", "freq_hz", "name", "tag", "samplerate", "channels",
