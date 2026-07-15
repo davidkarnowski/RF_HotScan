@@ -50,7 +50,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS recordings(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   unix_start REAL, unix_stop REAL, iso_start TEXT, iso_stop TEXT,
-  duration_s REAL, freq_hz INTEGER, name TEXT, tag TEXT,
+  duration_s REAL, freq_hz INTEGER, name TEXT, tag TEXT, desc TEXT,
   samplerate INTEGER DEFAULT 48000, channels INTEGER DEFAULT 1,
   format TEXT DEFAULT 'pcm_s16le', peak_dbfs REAL, n_frames INTEGER,
   wav_path TEXT, backend TEXT, app_version TEXT,
@@ -61,7 +61,11 @@ CREATE INDEX IF NOT EXISTS ix_rec_freq  ON recordings(freq_hz);
 """
 
 # additive columns for DBs created before STT existed (guarded migration)
-_MIGRATE = ("transcript TEXT", "transcript_engine TEXT", "transcript_model TEXT",
+_MIGRATE = (
+    "desc TEXT",
+    "transcript TEXT",
+    "transcript_engine TEXT",
+    "transcript_model TEXT",
             "transcript_rt REAL", "transcribed_at REAL",
             "healed_transcript TEXT", "healed_by_engine TEXT", "healed_at REAL")
 
@@ -101,11 +105,11 @@ class RecordingsDB:
         with self.lock:
             cur = self.conn.execute(
                 """INSERT INTO recordings(unix_start, unix_stop, iso_start,
-                   iso_stop, duration_s, freq_hz, name, tag, samplerate,
+                   iso_stop, duration_s, freq_hz, name, tag, desc, samplerate,
                    channels, format, peak_dbfs, n_frames, wav_path, backend,
-                   app_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   app_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (m["unix_start"], m["unix_stop"], m["iso_start"], m["iso_stop"],
-                 m["duration_s"], m["freq_hz"], m["name"], m["tag"],
+                 m["duration_s"], m["freq_hz"], m["name"], m["tag"], m.get("desc", ""),
                  m.get("samplerate", SAMPLERATE), m.get("channels", 1),
                  m.get("format", "pcm_s16le"), m["peak_dbfs"], m["n_frames"],
                  m["wav_path"], m.get("backend", "rtl"), APP_VERSION))
@@ -247,6 +251,7 @@ class WavRecorder:
              "iso_start": clock.utc_iso(start), "iso_stop": clock.utc_iso(stop),
              "duration_s": round(dur, 3), "freq_hz": int(self._meta.get("freq_hz", 0)),
              "name": self._meta.get("name", ""), "tag": self._meta.get("tag", ""),
+             "desc": self._meta.get("desc", ""),
              "samplerate": self.sr, "channels": 1, "format": "pcm_s16le",
              "peak_dbfs": round(peak_dbfs, 1), "n_frames": frames,
              "wav_path": path, "backend": self._meta.get("backend", "rtl")}
@@ -282,6 +287,7 @@ class WavRecorder:
                 self.on_start({"wav_path": self._path,
                                "name": self._meta.get("name", ""),
                                "tag": self._meta.get("tag", ""),
+                               "desc": self._meta.get("desc", ""),
                                "freq_hz": int(self._meta.get("freq_hz", 0)),
                                "unix_start": t_unix,
                                "iso_start": clock.utc_iso(t_unix)})

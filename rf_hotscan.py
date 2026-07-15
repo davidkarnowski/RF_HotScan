@@ -114,7 +114,7 @@ def map_mode(text):
 
 
 def load_bookmarks(path):
-    tags, chans, section = {}, [], None
+    tags, tag_desc, chans, section = {}, {}, [], None
     with open(path, newline="") as f:
         for raw in f:
             line = raw.rstrip("\n")
@@ -129,15 +129,24 @@ def load_bookmarks(path):
             parts = [p.strip() for p in line.split(";")]
             if section == "tags" and len(parts) >= 2:
                 tags[parts[0]] = parts[1]
+                if len(parts) >= 3:
+                    tag_desc[parts[0]] = parts[2]
             elif section == "chans" and len(parts) >= 5:
                 try:
                     freq = int(parts[0])
                 except ValueError:
                     continue
                 bw = int(parts[3]) if parts[3].isdigit() else 10000
+                desc = parts[5] if len(parts) >= 6 else ""
+                t_desc = tag_desc.get(parts[4], "")
+                if t_desc and desc:
+                    desc = f"{t_desc}. {desc}"
+                elif t_desc:
+                    desc = t_desc
+                    
                 chans.append({"freq": freq, "name": parts[1],
                               "mode": map_mode(parts[2]), "bw": bw,
-                              "tag": parts[4]})
+                              "tag": parts[4], "desc": desc})
     return tags, chans
 
 
@@ -403,6 +412,12 @@ class Scanner:
             "stt_enabled": False,   # transcribe recordings (RTL only)
             "stt_engine": "auto",   # provider name: parakeet-mlx | whisper-mlx | openai
             "stt_model": "",        # provider-specific model id ("" = provider default)
+            "enable_healing": False,
+            "healer_engine": "ollama",
+            "healer_model": "",
+            "agentic_fallback": False,
+            "fallback_stt_engine": "auto",
+            "fallback_stt_model": "",
             "priority_interval": 6.0,
             "last_listen_freq": None,   # Hz last manually tuned (playhead seed)
         }
@@ -1076,10 +1091,12 @@ class RecordingsView:
             t_str = r.get("iso_start", "")
             if "T" in t_str:
                 t_str = t_str.replace("T", " ").split(".")[0] + " UTC"
+            stt_label = f"{r.get('transcript_engine', '')} - {r.get('transcript_model', '')}".strip(" -")
+            heal_label = r.get("healed_by_engine", "")
             self.tree.insert("", "end", iid=r["id"], values=(
                 t_str, r.get("tag", ""), r.get("name", ""), f"{r.get('duration_s', 0):.1f}s",
-                r.get("transcript_engine", ""), r.get("transcript", ""),
-                r.get("healed_by_engine", ""), r.get("healed_transcript", "")
+                stt_label, r.get("transcript", ""),
+                heal_label, r.get("healed_transcript", "")
             ))
 
     def on_select(self, event):
@@ -1089,7 +1106,7 @@ class RecordingsView:
         if not rec: return
         self.detail_text.delete("1.0", "end")
         
-        stt_eng = rec.get("transcript_engine") or "None"
+        stt_eng = f"{rec.get('transcript_engine', '')} - {rec.get('transcript_model', '')}".strip(" -") or "None"
         self.detail_text.insert("end", f"--- RAW STT ({stt_eng}) ---\n")
         self.detail_text.insert("end", (rec.get("transcript") or "") + "\n\n")
         
@@ -1547,6 +1564,59 @@ class ScannerGUI:
                      bg=PANEL, fg=MUTED, font=("Helvetica", 8)).pack(anchor="w",
                                                                      padx=12)
 
+        self._section(self._record_section, "HEALING (LLM)")
+        self.var_heal = tk.BooleanVar(value=self.scanner.get_cfg("enable_healing"))
+        ttk.Checkbutton(self._record_section, text="Enable LLM Healing",
+                        variable=self.var_heal, command=self._apply_heal).pack(anchor="w", padx=12)
+        
+        try:
+            import healer
+            self._heal_opts = healer.engine_options()
+        except Exception:
+            self._heal_opts = []
+            
+        self.var_heal_eng = tk.StringVar()
+        if self._heal_opts:
+            saved_h_e = self.scanner.get_cfg("healer_engine")
+            saved_h_m = self.scanner.get_cfg("healer_model") or ""
+            cur_h = next((o for o in self._heal_opts
+                          if o["engine"] == saved_h_e
+                          and (o["model"] or "") == saved_h_m), self._heal_opts[0])
+            self.var_heal_eng.set(cur_h["label"])
+            row_h = tk.Frame(self._record_section, bg=PANEL)
+            row_h.pack(fill="x", padx=24, pady=(2, 0))
+            tk.Label(row_h, text="Model:", bg=PANEL, fg=MUTED,
+                     font=("Helvetica", 9)).pack(side="left")
+            self._heal_combo = ttk.Combobox(
+                row_h, textvariable=self.var_heal_eng, state="readonly",
+                values=[o["label"] for o in self._heal_opts], width=24,
+                font=("Helvetica", 9))
+            self._heal_combo.pack(side="left", padx=(4, 0))
+            self._heal_combo.bind("<<ComboboxSelected>>", self._apply_heal)
+        
+        self.var_fb = tk.BooleanVar(value=self.scanner.get_cfg("agentic_fallback"))
+        ttk.Checkbutton(self._record_section, text="Agentic Fallback (Dual-STT)",
+                        variable=self.var_fb, command=self._apply_heal).pack(anchor="w", padx=12, pady=(0, 4))
+
+        self.var_fb_engine = tk.StringVar()
+        if getattr(self, "_stt_opts", []):
+            saved_fb_e = self.scanner.get_cfg("fallback_stt_engine")
+            saved_fb_m = self.scanner.get_cfg("fallback_stt_model") or ""
+            cur_fb = next((o for o in self._stt_opts
+                           if o["engine"] == saved_fb_e
+                           and (o["model"] or "") == saved_fb_m), self._stt_opts[0])
+            self.var_fb_engine.set(cur_fb["label"])
+            row_fb = tk.Frame(self._record_section, bg=PANEL)
+            row_fb.pack(fill="x", padx=24, pady=(0, 4))
+            tk.Label(row_fb, text="STT:", bg=PANEL, fg=MUTED,
+                     font=("Helvetica", 9)).pack(side="left")
+            self._fb_stt_combo = ttk.Combobox(
+                row_fb, textvariable=self.var_fb_engine, state="readonly",
+                values=[o["label"] for o in self._stt_opts], width=24,
+                font=("Helvetica", 9))
+            self._fb_stt_combo.pack(side="left", padx=(4, 0))
+            self._fb_stt_combo.bind("<<ComboboxSelected>>", self._apply_heal)
+
     def _slider(self, parent, label, var, lo, hi, unit, cb):
         f = tk.Frame(parent, bg=PANEL)
         f.pack(fill="x", padx=12, pady=(6, 0))
@@ -1924,7 +1994,8 @@ class ScannerGUI:
                     return
                 self.scanner.set_cfg(stt_engine=prov.name, stt_model=model or "")
                 self.stt_service = stt.TranscriptionService(
-                    prov, rec.db, log=self.scanner.log)
+                    prov, rec.db, log=self.scanner.log,
+                    cfg_get=self.scanner.get_cfg)
             # feed finalized recordings to STT AND list transmissions live
             c.set_on_record(self._on_recording_done)
             if hasattr(c, "set_on_start"):
@@ -1941,6 +2012,32 @@ class ScannerGUI:
                 c.set_on_discard(None)
             self._show_transcripts(False)
 
+    def _apply_heal(self, *args):
+        fb_eng = "auto"
+        fb_mod = ""
+        if hasattr(self, "_fb_stt_combo") and getattr(self, "_stt_opts", []):
+            lbl = self.var_fb_engine.get()
+            for o in self._stt_opts:
+                if o["label"] == lbl:
+                    fb_eng, fb_mod = o["engine"], o["model"]
+                    break
+                    
+        h_eng = "ollama"
+        h_mod = ""
+        if hasattr(self, "_heal_combo") and getattr(self, "_heal_opts", []):
+            lbl = self.var_heal_eng.get()
+            for o in self._heal_opts:
+                if o["label"] == lbl:
+                    h_eng, h_mod = o["engine"], o["model"]
+                    break
+                    
+        self.scanner.set_cfg(enable_healing=self.var_heal.get(),
+                             healer_engine=h_eng,
+                             healer_model=h_mod,
+                             agentic_fallback=self.var_fb.get(),
+                             fallback_stt_engine=fb_eng,
+                             fallback_stt_model=fb_mod or "")
+
     def _apply_stt_engine(self, _=None):
         """Model dropdown changed — persist and rebuild a running service."""
         eng, model = self._selected_engine_model()
@@ -1955,7 +2052,7 @@ class ScannerGUI:
     # ---- live transmission listing (recorder thread -> txnq -> UI) ----
     def _on_recording_started(self, m):
         self.txnq.put({"kind": "start", "key": m.get("wav_path"),
-                       "name": m.get("name", ""), "tag": m.get("tag", ""),
+                       "name": m.get("name", ""), "tag": m.get("tag", ""), "desc": m.get("desc", ""),
                        "unix_start": m.get("unix_start")})
 
     def _on_recording_done(self, m):
@@ -1964,7 +2061,7 @@ class ScannerGUI:
                        "unix_stop": m.get("unix_stop"),
                        "duration_s": m.get("duration_s"),
                        "rec_id": m.get("id"),       # DB id, for re-transcription
-                       "name": m.get("name", ""), "tag": m.get("tag", "")})
+                       "name": m.get("name", ""), "tag": m.get("tag", ""), "desc": m.get("desc", "")})
         svc = self.stt_service
         if svc is not None:
             svc.enqueue(m)
@@ -2022,6 +2119,7 @@ class ScannerGUI:
             return
         svc.enqueue({"rec_id": it["rec_id"], "wav_path": key,
                      "name": it.get("name", ""), "tag": it.get("tag", ""),
+                     "desc": it.get("desc", ""),
                      "unix_start": it.get("unix_start"),
                      "duration": it.get("duration_s", 1.0)})
         it["text"] = ""           # show "…transcribing" until the new result lands
@@ -2628,7 +2726,7 @@ class ScannerGUI:
         kind = ev.get("kind")
         if kind == "start":
             it.update(unix_start=ev.get("unix_start"), name=ev.get("name", ""),
-                      tag=ev.get("tag", ""), live=True)
+                      tag=ev.get("tag", ""), desc=ev.get("desc", ""), live=True)
         elif kind == "stop":
             it.update(unix_stop=ev.get("unix_stop"),
                       duration_s=ev.get("duration_s"),
@@ -2639,6 +2737,8 @@ class ScannerGUI:
                 it["name"] = ev.get("name", "")
             if not it.get("tag"):
                 it["tag"] = ev.get("tag", "")
+            if not it.get("desc"):
+                it["desc"] = ev.get("desc", "")
         elif kind == "text":
             it.update(text=ev.get("text", ""), status=ev.get("status"),
                       rt=ev.get("rt"), live=False)

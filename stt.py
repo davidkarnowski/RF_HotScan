@@ -23,6 +23,11 @@ import threading
 
 import clock
 
+try:
+    import healer
+except Exception:
+    healer = None
+
 
 def _load_dotenv():
     """Load KEY=VALUE lines from a .env next to this module into os.environ
@@ -437,10 +442,15 @@ class TranscriptionService:
     Decoupled from the audio/scan threads; never blocks them.
     """
 
-    def __init__(self, provider, db, log=None):
+    def __init__(self, provider, db, log=None, cfg_get=None):
         self.provider = provider
         self.db = db
         self.log = log or (lambda *_a: None)
+        # Healing/fallback settings are read per-job via the scanner's
+        # lock-guarded get_cfg (cfg access goes through the lock).
+        self.cfg_get = cfg_get or (lambda _k: None)
+        self._fb_prov = None       # cached agentic-fallback STT provider
+        self._fb_key = None        # (engine, model) the cache was built for
         self.q = queue.Queue(maxsize=64)
         self.transcriptq = queue.Queue()     # UI lines (drained by the GUI)
         self.ready = False
@@ -457,6 +467,7 @@ class TranscriptionService:
         job = {"rec_id": rec.get("id", rec.get("rec_id")),
                "wav_path": rec.get("wav_path"),
                "name": rec.get("name", ""), "tag": rec.get("tag", ""),
+               "desc": rec.get("desc", ""),
                "iso_start": rec.get("iso_start"),
                "unix_start": rec.get("unix_start"),
                "duration": rec.get("duration_s", rec.get("duration", 1.0))}
@@ -512,6 +523,66 @@ class TranscriptionService:
                               "name": job.get("name", ""),
                               "text": text, "status": status, "rt": rt})
 
+    def _fallback_provider(self):
+        """Build (once) and reuse the agentic-fallback STT provider. A failed
+        build is cached as None so a broken engine isn't retried every job."""
+        key = (self.cfg_get("fallback_stt_engine") or "auto",
+               self.cfg_get("fallback_stt_model") or "")
+        if key != self._fb_key:
+            self._fb_key = key
+            self._fb_prov = None
+            prov = make_provider(key[0], key[1] or None) or make_provider(key[0])
+            if prov is not None and prov.name != self.provider.name:
+                try:
+                    ok, detail = prov.ensure_ready()
+                    if ok:
+                        prov.warm_up()
+                        self._fb_prov = prov
+                    else:
+                        self.log(f"Fallback STT unavailable: {detail}")
+                except Exception as e:
+                    self.log(f"Fallback STT load failed: {e}")
+        return self._fb_prov
+
+    def _heal(self, job, text, audio):
+        """Optional LLM cleanup of a raw transcript (healer.py). Returns the
+        healed text, or None when healing is off/unavailable/unchanged. With the
+        agentic fallback enabled, junk or very short transcripts get a second
+        STT opinion first so the LLM can arbitrate between the two readings."""
+        if healer is None or not self.cfg_get("enable_healing"):
+            return None
+        hp = healer.make_healer(self.cfg_get("healer_engine") or "ollama",
+                                self.cfg_get("healer_model") or "")
+        if hp is None or not hp.available():
+            return None
+        second_text = None
+        if self.cfg_get("agentic_fallback") and (is_junk(text)
+                                                 or len(text.split()) < 3):
+            fb = self._fallback_provider()
+            if fb is not None:
+                try:
+                    if fb.wants_audio and audio is None:
+                        audio = read_wav_mono16k(job["wav_path"])
+                    second_text = fb.transcribe(
+                        audio, TARGET_SR, wav_path=job["wav_path"]).strip()
+                except Exception as e:
+                    self.log(f"Fallback STT failed: {e}")
+        context = {"name": job.get("name"), "tag": job.get("tag"),
+                   "desc": job.get("desc", "")}
+        healed = hp.heal(text, context, second_text)
+        if getattr(hp, "last_error", None):
+            self.log(f"Healer error ({hp.name}): {hp.last_error}")
+            return None
+        healed = (healed or "").strip()
+        if not healed or healed == text or is_junk(healed):
+            return None
+        eng_label = f"{hp.name} - {getattr(hp, 'model', '')}".strip(" -")
+        self.db.set_transcript(job["rec_id"], healed_transcript=healed,
+                               healed_by_engine=eng_label,
+                               healed_at=clock.now_unix())
+        self.log(f"HEAL {job.get('name', '')}: {healed[:60]}")
+        return healed
+
     def _do(self, job):
         try:
             audio = None
@@ -524,7 +595,11 @@ class TranscriptionService:
                 audio, TARGET_SR, wav_path=job["wav_path"]).strip()
             dur = max(0.01, float(job.get("duration", (n / TARGET_SR) or 1.0)))
             rt = (time.time() - t0) / dur
-            if is_junk(text):
+            raw = "" if is_junk(text) else text
+            # Healing runs BEFORE the junk short-circuit so the agentic dual-STT
+            # fallback gets a chance to rescue a garbage transcription.
+            healed = self._heal(job, text, audio)
+            if not raw and not healed:
                 # No intelligible speech — still list it, with a status.
                 self.db.set_transcript(job["rec_id"], transcript="",
                                        transcript_engine=self.provider.name,
@@ -533,12 +608,12 @@ class TranscriptionService:
                 self.log(f"STT {job.get('name', '')}: (no intelligible speech)")
                 return
             self.db.set_transcript(
-                job["rec_id"], transcript=text,
+                job["rec_id"], transcript=raw,
                 transcript_engine=self.provider.name,
                 transcript_model=getattr(self.provider, "model_id", ""),
                 transcript_rt=round(rt, 3), transcribed_at=clock.now_unix())
-            self._emit(job, text, None, rt)
-            self.log(f"STT {job.get('name', '')}: {text[:60]}")
+            self._emit(job, healed or raw, None, rt)
+            self.log(f"STT {job.get('name', '')}: {(healed or raw)[:60]}")
         except Exception as e:
             self.log(f"STT failed for {job.get('name', '')}: {e}")
             self._emit(job, "", "error")

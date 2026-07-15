@@ -296,6 +296,8 @@ class RtlBackend:
         try:
             with self.lock:
                 if self.sdr is not None:       # idempotent: reopen with current params
+                    if self._streaming.is_set():
+                        raise RuntimeError("Cannot close SDR while it is still streaming asynchronously")
                     try:
                         self.sdr.close()
                     except Exception:
@@ -329,7 +331,12 @@ class RtlBackend:
 
     # ---- Phase 1: channelized power sweep ----
     def _capture(self, center_hz):
+        t0 = time.time()
+        while self._streaming.is_set() and time.time() - t0 < 1.0:
+            time.sleep(0.01)
         with self.lock:
+            if self.sdr is None or self._streaming.is_set():
+                return np.zeros(0, dtype=np.complex128)
             self.sdr.center_freq = int(center_hz)
             return self.sdr.read_samples(self.sweep_nsamp)
 
@@ -341,7 +348,12 @@ class RtlBackend:
         per-window sample count for this one capture; defaults to sweep_nsamp."""
         if nsamp is None:
             return self._capture(center_hz)
+        t0 = time.time()
+        while self._streaming.is_set() and time.time() - t0 < 1.0:
+            time.sleep(0.01)
         with self.lock:
+            if self.sdr is None or self._streaming.is_set():
+                return np.zeros(0, dtype=np.complex128)
             self.sdr.center_freq = int(center_hz)
             return self.sdr.read_samples(int(nsamp))
 
@@ -416,10 +428,6 @@ class RtlBackend:
 
         def iq_cb(samples, _ctx):
             if self._audio_stop.is_set():
-                try:
-                    self.sdr.cancel_read_async()
-                except Exception:
-                    pass
                 return
             try:
                 # Squelch decision FIRST (from raw IQ power, independent of the
@@ -616,7 +624,7 @@ class RtlBackend:
         self._live_power = self._threshold      # seed so first hold read isn't stale
         if self.record_enabled and self._recorder is not None:
             self._recorder.arm({"freq_hz": ch["freq"], "name": ch.get("name", ""),
-                                "tag": ch.get("tag", ""), "backend": "rtl"})
+                                "tag": ch.get("tag", ""), "desc": ch.get("desc", ""), "backend": "rtl"})
         self._playing = True
         self.play_async(int(ch["freq"]))
 
