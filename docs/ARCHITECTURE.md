@@ -5,13 +5,17 @@ Tkinter. It has no build step and no package install — run `rf_hotscan.py` dir
 
 | File | Lines | Role |
 |------|------:|------|
-| `rf_hotscan.py` | 2,745 | Scanner engine, GUI, bookmark loader, main entry |
-| `rtl_backend.py` | 730 | RTL-SDR backend: sweep, listen, FM demod, dongle coordination |
-| `heatmap.py` | 1,713 | Wideband heatmap: recorder, SQLite store, waterfall view, CLI |
-| `recorder.py` | 307 | Audio recording to WAV |
-| `stt.py` | 581 | Speech-to-text integration (Whisper / Vosk) |
-| `player.py` | 160 | Audio playback utilities |
-| `clock.py` | 51 | Monotonic clock helpers |
+| `rf_hotscan.py` | ~3,000 | Scanner engine, GUI, Recordings tab, bookmark loader, main entry |
+| `rtl_backend.py` | ~740 | RTL-SDR backend: sweep, listen, FM demod, dongle coordination |
+| `heatmap.py` | ~1,710 | Wideband heatmap: recorder, SQLite store, waterfall view, CLI |
+| `recorder.py` | ~310 | Audio recording to WAV + RecordingsDB (SQLite) |
+| `stt.py` | ~660 | STT providers (Parakeet-MLX, Whisper-MLX, Voxtral, OpenAI) + TranscriptionService with LLM healing |
+| `healer.py` | ~120 | LLM transcript healing (Ollama / OpenAI via stdlib urllib) |
+| `player.py` | ~160 | Audio playback utilities |
+| `clock.py` | 50 | Shared time base (UTC epoch + monotonic helpers) |
+
+Line counts are approximate; treat class/function names, not line numbers, as
+the stable anchors when navigating.
 
 ## Block Diagram
 
@@ -30,7 +34,7 @@ Tkinter. It has no build step and no package install — run `rf_hotscan.py` dir
 │           │                            │                   │
 │    ┌──────┴──────┐              ┌──────▼──────┐           │
 │    │  GqrxClient │              │ SweepSource │           │
-│    │  (TCP/4532) │              │ (base class)│           │
+│    │  (TCP/7356) │              │ (base class)│           │
 │    └─────────────┘              └──────┬──────┘           │
 │                                        │                   │
 │    ┌─────────────┐              ┌──────▼──────────┐       │
@@ -43,6 +47,11 @@ Tkinter. It has no build step and no package install — run `rf_hotscan.py` dir
 Both backends (`GqrxClient` and `RtlBackend`) implement the same interface, so the
 scanner engine is backend-agnostic. The `SdrShareCoordinator` arbitrates dongle access
 between the scanner and the heatmap recorder.
+
+Not shown in the diagram: a third Notebook tab, **Recordings**, hosts
+`RecordingsView` (rf_hotscan.py) — a browser over `recordings.sqlite` with its
+own WAL connection, playback via `player.WavPlayer`, and inline editing of the
+healed-transcript column. It refreshes on demand (↻ button), not live.
 
 ---
 
@@ -62,11 +71,14 @@ Key functions:
 | `band_index(freq, bands)` | Return which band a frequency belongs to |
 | `luminance()` / `contrast_fg()` | Compute readable foreground color for tag label chips |
 
-**CID keying.** Channels are identified by a composite ID (CID), not by frequency alone.
-Duplicate-frequency bookmarks are valid (e.g., same frequency with different modes or
-tags). All per-channel state — enabled, priority, lockout, last-active — is keyed by CID.
-The settings persistence scheme uses a `freq:name` signature so that edits to the
-bookmarks file don't silently discard saved state.
+**CID vs. frequency keying.** Each channel gets a stable composite ID (CID) because
+duplicate-frequency bookmarks are valid (e.g., same frequency with different names or
+tags). *Per-bookmark* state — the enabled/disabled tick — is keyed by CID and persisted
+by a `freq:name` signature so bookmark-file edits don't silently discard saved state.
+*Per-frequency* state — lockout, priority, last-active — is keyed by frequency **by
+design**: a level-only scanner cannot distinguish two bookmarks sharing a frequency,
+so those flags honestly apply to the frequency itself (and the scan rotation visits
+each frequency once per sweep).
 
 ---
 
@@ -97,9 +109,10 @@ Every backend must implement:
 | `on_hold(ch, thr)` | Called when scanner locks onto a channel |
 | `on_resume()` | Called when scanner releases a channel |
 
-### GqrxClient (rf_hotscan.py L178–256)
+### GqrxClient (rf_hotscan.py)
 
-TCP rigctl wrapper speaking Hamlib protocol on port 4532. Each command is serialized
+TCP rigctl wrapper speaking Hamlib protocol on port **7356** (GQRX's remote-control
+default, `127.0.0.1:7356`). Each command is serialized
 through a `threading.Lock`. `recommended_settle_ms = 350` — GQRX needs time to
 re-settle its DSP chain after a retune.
 
@@ -109,7 +122,7 @@ Method map to rigctl verbs:
 - `set_freq()` → `F <hz>`, `get_freq()` → `f`
 - `set_mode()` → `M <mode> <bw>`, `get_mode()` → `m`
 
-### RtlBackend (rtl_backend.py L243–670)
+### RtlBackend (rtl_backend.py)
 
 Direct RTL-SDR access via `librtlsdr`. Core constants:
 
@@ -129,7 +142,7 @@ fewest ~2 MHz windows. Nudges center frequencies to keep channels away from the 
 everywhere (sweep, single-channel reads, hold squelch checks). Pipeline:
 127-tap FIR bandpass → frequency-shift to baseband → filter → mean |x|² → dB.
 
-**FMDemod (L103–199)** — Stateful narrowband FM demodulator chain:
+**FMDemod** — Stateful narrowband FM demodulator chain:
 
 ```
 IQ → NCO shift → LPF + decimate ÷10 → channel LPF + decimate ÷5 (→ 48 kHz)
@@ -153,7 +166,7 @@ access. Attempting to acquire while busy raises `DongleBusy(RuntimeError)`.
 
 ---
 
-## §3 Scanner Engine (rf_hotscan.py L379–1009)
+## §3 Scanner Engine (`Scanner`, rf_hotscan.py)
 
 The `Scanner` runs on a dedicated daemon thread. It owns the backend connection and
 performs ALL backend I/O — the GUI never talks to hardware directly.
@@ -165,21 +178,27 @@ performs ALL backend I/O — the GUI never talks to hardware directly.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `enabled_tags` | all | Which tag groups to scan |
-| `lockout` | `set()` | CIDs to skip |
-| `disabled_cids` | `set()` | Per-channel disable |
-| `priority_freqs` | `set()` | CIDs to check more often |
+| `lockout` | `set()` | Frequencies to skip |
+| `disabled_cids` | `set()` | Per-channel disable (by CID) |
+| `priority_freqs` | `set()` | Frequencies to check more often |
 | `squelch_mode` | `"auto"` | `"auto"` or `"global"` |
 | `global_sql` | `-50.0` | Manual squelch threshold (dBFS) |
 | `auto_margin` | `8.0` | dB above noise floor for auto mode |
-| `settle_ms` | `350` | Post-tune settling time |
+| `settle_ms` | `350` | Post-tune settling time (GQRX; RTL uses 30) |
 | `hold_s` | `3.0` | Seconds of silence before releasing |
 | `record` | `False` | Enable audio recording |
-| `mute_squelch` | `False` | Mute audio below squelch |
+| `mute_squelch` | `True` | Mute audio below squelch |
 | `stt_enabled` | `False` | Enable speech-to-text |
-| `stt_engine` | `""` | `"whisper"` or `"vosk"` |
-| `stt_model` | `""` | Model path |
+| `stt_engine` | `"auto"` | `parakeet-mlx` \| `whisper-mlx` \| `voxtral` \| `openai` |
+| `stt_model` | `""` | Provider-specific model id (`""` = provider default) |
+| `enable_healing` | `False` | LLM cleanup of transcripts (healer.py) |
+| `healer_engine` | `"ollama"` | `"ollama"` or `"openai"` |
+| `healer_model` | `""` | Healer model id (`""` = provider default) |
+| `agentic_fallback` | `False` | Second STT opinion for junk/short transcripts |
+| `fallback_stt_engine` | `"auto"` | Provider for the second opinion |
+| `fallback_stt_model` | `""` | Model for the second opinion |
 | `priority_interval` | `6.0` | Seconds between priority checks |
-| `last_listen_freq` | `None` | Frequency for listen mode |
+| `last_listen_freq` | `None` | Playhead seed frequency (Hz) |
 
 **`self.ui`** (read by GUI via `_refresh`):
 
@@ -198,7 +217,7 @@ performs ALL backend I/O — the GUI never talks to hardware directly.
 | `tuned` | Currently tuned frequency |
 | `listening` | `True` if in listen mode |
 
-### The Scan Loop (L546–623)
+### The Scan Loop (`_loop`)
 
 ```
 _loop():
@@ -219,16 +238,16 @@ _loop():
                     _hold(ch)         # ~30s full scan
 ```
 
-**`_sweep_pass` (L625–668)** — Calls `client.sweep(freqs)`, picks the strongest active
+**`_sweep_pass`** — Calls `client.sweep(freqs)`, picks the strongest active
 channel above threshold. Priority channels are favored. One sweep takes ~1 second for
 RTL vs ~30 seconds per sequential GQRX scan.
 
-### Hold (L685–749)
+### Hold
 
-**`_hold` (L685–706)** — Calls `client.on_hold(ch, thr)` if available (enables RTL audio
+**`_hold`** — Calls `client.on_hold(ch, thr)` if available (enables RTL audio
 demod), then enters `_hold_loop`. On exit, calls `client.on_resume()`.
 
-**`_hold_loop` (L708–749)** — Polls `strength()` at ~80 ms intervals. Releases after
+**`_hold_loop`** — Polls `strength()` at ~80 ms intervals. Releases after
 `hold_s` seconds of continuous silence (signal below threshold). The `skip` event
 breaks out immediately. Priority pre-emption can interrupt a hold, **but NOT while
 RTL `_playing`** (to avoid cutting off active audio).
@@ -254,13 +273,13 @@ RTL `_playing`** (to avoid cutting off active audio).
 GQRX's UI, not ours), and we're in `global` mode, the scanner adopts the new value.
 `_suppress_push` guards against GUI feedback loops when the app itself pushes a value.
 
-### Auto-Noise-Floor Calibration (L928–1009)
+### Auto-Noise-Floor Calibration (`_measure_noise_floor`)
 
 Pauses scanning and enters `CALIBRATING` state. For each band:
 
 1. Generate candidate frequencies at 25 kHz steps across the band span
 2. Exclude frequencies within 15 kHz of any bookmarked channel
-3. Cap at ~15 samples per band
+3. Cap at 20 samples per band (`max_samples`)
 4. Tune to each candidate, read `strength()`, report live progress to `ui`
 5. Store **median** power as the band's noise floor
 6. Auto threshold = floor + `auto_margin`
@@ -272,7 +291,7 @@ dies silently — errors are captured and surfaced in `ui["msg"]`.
 
 ---
 
-## §4 ScannerGUI (rf_hotscan.py L1015–~2680)
+## §4 ScannerGUI (rf_hotscan.py)
 
 ### Dark Theme
 
@@ -317,6 +336,17 @@ widgets. No backend I/O occurs on the GUI thread.
 performs a live swap: stops the engine, closes the old backend, opens the new one, and
 restarts scanning.
 
+### Recordings tab (`RecordingsView`)
+
+A browser over past transmissions, hosted as the second Notebook tab. It opens
+its **own** WAL connection to `recordings.sqlite` (safe alongside the recorder's
+connection) and loads the latest 300 rows on demand — press ↻ Refresh to see new
+recordings; the tab is not live-updated. Columns: time (UTC), tag, channel,
+duration, STT engine, raw transcript, healer, healed transcript. Double-click a
+row to play it (`player.WavPlayer` with pause/resume and a progress bar);
+double-click the *Healed STT* column to edit that cell inline (saved back via
+`RecordingsDB.set_transcript`).
+
 ---
 
 ## §5 Heatmap (heatmap.py)
@@ -340,7 +370,11 @@ SweepSource (base class)
 Defines the sweep parameters: `f_start`, `f_stop`, `samp_rate`, `bin_hz` (default 3000),
 `gain`, `crop` (0.20 — discard 20% of band edges), `device`, `duration_s` (30),
 `margin_db` (8), `iq_mode`, `colormap`. Derives FFT geometry and tiles the requested
-range into ~2 MHz windows via `plan_range_windows`.
+range into windows via `plan_range_windows`. Each window is *captured* at the full
+sample rate (2.4 MHz default) but only the central `samp_rate × (1 − 2·crop)` ≈
+**1.44 MHz** survives the edge crop and is stitched into the grid — don't assume a
+literal 2 MHz of coverage per hop. Detection knobs beyond `margin_db`
+(`duty_thresh=0.02`, `gap_bins=2`, floor `leak_db=0.02`) are currently hardcoded.
 
 ### Sweep DSP Pipeline
 
@@ -371,11 +405,21 @@ against `floor + margin_db`. Contiguous active bins are clustered into activity 
   colormaps and auto-range scaling
 - **Offline** — `render_session_png()` produces a matplotlib figure for export
 
-### Shared Dongle — SdrShareCoordinator (rf_hotscan.py L2681–2720)
+### Shared Dongle — SdrShareCoordinator (rf_hotscan.py)
 
 `begin_external_use(label)` pauses the scanner and quiesces audio, then returns a
 connected `RtlBackend`. `end_external_use()` resumes scanning. This is how the heatmap
 recorder borrows the dongle without conflicting with the scanner.
+
+When there is nothing to borrow (Scanner on GQRX, or RTL not connected), the heatmap
+opens its own dongle — and in that path `RtlSweepSource.open` will **quit a running
+GQRX** to free the USB device. That external side effect is intentional; be aware of
+it when scripting.
+
+GUI settings for the tab persist in `heatmap_settings.json` next to the app. Power
+frames are stamped `t_unix` + `t_dur_ms` in their DB rows (`append_sweep`); the JSONL
+event stream (`emit_event`) stamps events with `t` + `iso` — two mechanisms, two
+field sets.
 
 ### Headless / CLI
 
@@ -405,8 +449,11 @@ These architectural invariants must be preserved across all changes:
    scanner exclusively through `set_cfg`, `request` (action queue), and `Events`.
    Never call backend methods from the Tk main loop.
 
-2. **Per-channel state is keyed by CID, not frequency.** Duplicate-frequency bookmarks
-   are valid. Using raw frequency as a key will silently merge distinct channels.
+2. **Know what keys what.** Duplicate-frequency bookmarks are valid. The
+   enabled/disabled tick is keyed by CID (persisted by `freq:name` signature);
+   lockout, priority, and last-active are keyed by frequency *by design* (see
+   §1, "CID vs. frequency keying"). Don't merge the two schemes in either
+   direction.
 
 3. **Keep the scan hot-path lean.** One tune + one strength read per hop in sequential
    mode; one `sweep()` call in batch mode. Do not add per-channel overhead.

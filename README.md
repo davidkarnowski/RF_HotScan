@@ -48,6 +48,15 @@ Linux/Ubuntu secondary, Windows out of scope.
   gpt-4o-transcribe, whisper-1). Re-transcribe ↻ button per transcript
   row.
 
+- **Transcript healing (LLM)** — optional cleanup of STT output using channel
+  context (name, tag, description), via a local Ollama model or OpenAI.
+  An *agentic dual-STT fallback* gets a second STT opinion on junk or very
+  short transcripts and lets the LLM arbitrate between the two readings.
+
+- **Recordings tab** — browse past transmissions (raw + healed transcripts),
+  play them back with pause/resume and a progress bar, and edit healed
+  transcripts inline.
+
 - **Auto-Noise-Floor** — samples empty frequencies, measures the noise
   floor per band, and sets squelch relative to live RF conditions.
 
@@ -184,6 +193,10 @@ the Heatmap opens its own dongle directly.
 
 - **Speech-to-text** — see `requirements-stt.txt`.
 
+- **Transcript healing** — `healer.py` is stdlib-only, but needs either a
+  running [Ollama](https://ollama.com) daemon (`localhost:11434`) or
+  `OPENAI_API_KEY` in `.env`.
+
 ---
 
 ## Setup
@@ -274,6 +287,24 @@ LBFD                ; #ff0000
 - **Bandwidth** in Hz.
 - **Tags** = single tag name matching the tag table.
 
+#### Optional description fields (RF HotScan extension)
+
+RF HotScan reads an optional extra field on both sections — a 3rd field on tag
+lines and a 6th field on channel lines — as a free-text **description**:
+
+```
+# Tag name          ;  color   ; description
+LBFD                ; #ff0000  ; Long Beach Fire Department
+
+# Frequency ; Name  ; Modulation ; Bandwidth; Tags; description
+   153950000; LB FD V-1 Fire Dispatch [D132]; Narrow FM; 10000; LBFD; Primary fire dispatch
+```
+
+Tag-level and channel-level descriptions are merged and passed to the LLM
+transcript healer as context. GQRX itself ignores these fields — but
+⚠️ **editing bookmarks inside GQRX rewrites the CSV and will strip them**.
+If you use descriptions, edit the file by hand and keep a backup.
+
 ### How the bundled set was built
 
 Compiled from publicly referenced channel listings (RadioReference
@@ -301,6 +332,7 @@ databases, FCC ULS records). Conventions:
 | `./recordings/` | WAVs + `recordings.sqlite` + `recordings.events.jsonl`. |
 | `./heatmap.sqlite` | Heatmap sessions + per-sweep power rows. |
 | `./heatmap.log` / `./heatmap.events.jsonl` | Heatmap verbose log + JSONL event stream. |
+| `./heatmap_settings.json` | Persisted Heatmap-tab GUI settings. |
 | `./iq/` | Opt-in raw IQ dumps (`.cf32`). |
 
 ---

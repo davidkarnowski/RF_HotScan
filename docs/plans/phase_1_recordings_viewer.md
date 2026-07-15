@@ -1,7 +1,13 @@
 # Phase 1: Database Migration & In-App Recordings Viewer
 
-**Status:** Planned
+**Status:** Complete (commit `3e1ba2a`)
 **Focus:** UI & Data Persistence
+
+> **Deviations from this plan (as implemented):** `RecordingsView` opens its own
+> `RecordingsDB` WAL connection instead of receiving the app's instance (safe;
+> the tab refreshes on demand via ↻, not live). The UI grew beyond the sketch:
+> pause/resume playback with a progress bar and status label, STT-engine and
+> healer columns, and double-click inline editing of the healed-transcript cell.
 
 This phase adds the foundational database columns required for healed transcripts and introduces a dedicated "Recordings" tab in the `rf_hotscan.py` GUI. This phase does not implement the actual LLM calls; it just ensures the data layer can store them and the UI can display and play historical recordings. This phase can be implemented entirely independently of Phase 2.
 

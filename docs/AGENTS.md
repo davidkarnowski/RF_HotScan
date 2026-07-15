@@ -1,18 +1,20 @@
 # RF HotScan — Agent Guide
 
 Modular Python/Tkinter bookmark scanner for RTL-SDR dongles (primary) with legacy GQRX TCP fallback.
-Audio recorder, speech-to-text transcriber, and wideband heatmap — all in one app.
+Audio recorder, speech-to-text transcriber with LLM transcript healing, recordings browser, and
+wideband heatmap — three tabs (Scanner / Recordings / Heatmap) in one app.
 
 | Module | Lines | Role |
 |---|---|---|
-| `rf_hotscan.py` | 2 745 | GUI + scanner engine + GqrxClient |
-| `rtl_backend.py` | 730 | Direct RTL-SDR backend (pyrtlsdr) |
-| `heatmap.py` | 1 713 | Wideband sweep, DB, detection, rendering |
-| `recorder.py` | 307 | WAV squelch-gated recorder |
-| `stt.py` | 581 | Speech-to-text providers + TranscriptionService |
-| `player.py` | 160 | Audio playback |
-| `clock.py` | 51 | Single time-source (stdlib only) |
-| `test_heatmap.py` | 230 | Heatmap unit tests |
+| `rf_hotscan.py` | ~3 000 | GUI + scanner engine + GqrxClient + RecordingsView |
+| `rtl_backend.py` | ~740 | Direct RTL-SDR backend (pyrtlsdr) |
+| `heatmap.py` | ~1 710 | Wideband sweep, DB, detection, rendering |
+| `recorder.py` | ~310 | WAV squelch-gated recorder + RecordingsDB |
+| `stt.py` | ~660 | Speech-to-text providers + TranscriptionService (+ healing hook) |
+| `healer.py` | ~120 | LLM transcript healing providers (stdlib urllib; Ollama + OpenAI) |
+| `player.py` | ~160 | Audio playback |
+| `clock.py` | 50 | Single time-source (stdlib only) |
+| `test_heatmap.py` | ~230 | Heatmap unit tests |
 
 ---
 
@@ -34,13 +36,20 @@ For headless or CI work, the log file is the primary observation channel.
 
 ### Headless engine smoke-test
 
+Run from the repo root (verified-runnable; the engine thread starts and the
+state lands on `DISCONNECTED` when GQRX isn't running — that's success):
+
 ```python
-from rf_hotscan import ScanEngine, ScanConfig
-cfg = ScanConfig(...)
-eng = ScanEngine(cfg)
-eng.start()
+from rf_hotscan import Scanner, GqrxClient, load_bookmarks, cluster_bands, BOOKMARKS
+tags, chans = load_bookmarks(BOOKMARKS)
+for i, c in enumerate(chans):
+    c["cid"] = i
+sc = Scanner(GqrxClient(), tags, chans, cluster_bands(chans))
+sc.request("reconnect")            # engine thread connects (harmless if GQRX is closed)
+import time; time.sleep(1.0)
+print("state:", sc.snapshot_ui()["state"])
+sc.alive = False                   # stop the engine thread
 # ... observe scanner.log ...
-eng.stop()
 ```
 
 ### Headless GUI smoke-test (Tk opens then closes)
@@ -85,12 +94,18 @@ Known levels on GQRX 2.17.x: **STRENGTH** (read-only), **SQL**, **AF**, **LNA_GA
 
 1. **Only the engine thread touches the backend/socket.**
    GUI communicates via `set_cfg` / `request` / `Events`.
-2. **Key by `cid`, not frequency.**
-   Multiple bookmarks can share a frequency.
+2. **Channel identity vs. RF state.** Multiple bookmarks can share a frequency.
+   *Per-bookmark* state (enabled/disabled) is keyed by `cid` and persisted by a
+   `freq:name` signature. *Per-frequency* state (lockout, priority, last-active)
+   is keyed by frequency **by design** — a level-only scanner cannot tell two
+   bookmarks on one frequency apart, so locking/prioritizing the frequency is
+   the honest behavior. Don't "fix" this to CID keying.
 3. **Scan hot-path is lean:** one tune + one strength read per hop.
 4. **Scan thread never dies silently** — unhandled exceptions are caught, logged, and surfaced.
 5. **Detection is level-only** — no tone/digital decode in the scan loop.
-6. **`cfg` / UI access goes through the lock.**
+6. **`cfg` / UI access goes through the lock.** Worker threads read config via
+   `Scanner.get_cfg` (lock-guarded) — e.g. `TranscriptionService` receives it as
+   its `cfg_get` callable. Never hand the raw `cfg` dict to another thread.
 
 ---
 
@@ -226,6 +241,27 @@ States: `loading` → `idle` → `transcribing` → (back to `idle` or `error`).
 Filters junk transcriptions, writes results to `RecordingsDB`, emits via `transcriptq` → GUI **Transcripts** pane.
 
 `WavRecorder.on_record(meta)` feeds completed recordings into the service.
+
+### Transcript healing (`healer.py`, optional)
+
+An LLM pass that cleans up raw transcripts using channel context (`name`,
+`tag`, `desc` from the bookmark file's description fields).
+
+- `HealerProvider` interface: `available()` / `heal(text, context, second_text)`;
+  failures set `last_error` and return the input text unchanged.
+- Providers: `ollama` (local daemon at `localhost:11434`; models discovered
+  live) and `openai` (chat completions via stdlib urllib; gated on
+  `OPENAI_API_KEY`). `make_healer(name, model)` builds one; `engine_options()`
+  feeds the GUI picker. **`healer.py` must stay stdlib-only.**
+- Flow (`TranscriptionService._heal`): runs when `enable_healing` is on, BEFORE
+  the junk short-circuit. With `agentic_fallback` on, junk or <3-word
+  transcripts first get a second opinion from a cached fallback STT provider
+  (`fallback_stt_engine`/`fallback_stt_model`), and the LLM arbitrates between
+  the two readings. A junk transcript rescued by healing is emitted as real
+  text; an unrescued one falls through to `no_speech`.
+- Results land in `recordings.sqlite` columns `healed_transcript`,
+  `healed_by_engine`, `healed_at` (UTC epoch via `clock.now_unix()`), and are
+  visible/editable in the Recordings tab.
 
 ---
 

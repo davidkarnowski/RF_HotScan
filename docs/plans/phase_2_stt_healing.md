@@ -1,7 +1,19 @@
 # Phase 2: Context-Based STT Healing & Agentic STT
 
-**Status:** Planned
+**Status:** Implemented — remediated & verified in Phase 3
+(see `docs/plans/phase_3_remediation.md`)
 **Focus:** AI/Backend (LLM integration)
+
+> **Deviations from this plan (as implemented + Phase 3 fixes):** healer model is
+> configurable (Ollama models discovered live from the daemon; default
+> `qwen2.5:1.5b-instruct`, not `llama3`); the OpenAI healer uses stdlib urllib,
+> not the openai package; the fallback STT engine/model is user-configurable
+> instead of hardcoded `whisper-mlx`; a channel-description (`desc`) context
+> pipeline was added end-to-end (bookmarks CSV → recorder → DB → healer prompt);
+> the `is_junk(text) or len < 3` fallback trigger from §2 was restored in Phase 3
+> (the first implementation only checked word count); config reaches
+> `TranscriptionService` as a lock-guarded `cfg_get` callable rather than the raw
+> cfg dict.
 
 This phase introduces an AI layer to clean up, correct, and deduce transcriptions based on radio channel context. It also introduces an optional agentic fallback where a second STT model is consulted if the first transcription is poor. This phase operates on top of the DB schema introduced in Phase 1.
 
