@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-RF HotScan — a tag-aware bookmark scanner GUI for GQRX.
+RF HotScan — a tag-aware bookmark scanner for RTL-SDR dongles.
 
-Reads ~/.config/gqrx/bookmarks.csv (the tag colours and channels we built),
-drives GQRX over its remote-control TCP interface (Tools -> Remote control,
-127.0.0.1:7356), and scans the bookmarks for activity above a squelch
-threshold.
+Drives an RTL-SDR Blog dongle directly (pyrtlsdr) as the primary backend:
+channelized FFT sweep across the bookmarked frequencies, NBFM demod with
+gapless audio on hold, per-transmission WAV recording, optional speech-to-text
+with LLM transcript healing, and a spectrum heatmap tab. A legacy GQRX
+remote-control backend (rigctl TCP, 127.0.0.1:7356) is retained as a fallback.
+Bookmarks are read from GQRX's ~/.config/gqrx/bookmarks.csv (or ./bookmarks.csv).
 
 Features
   - Tag filtering that also shows/hides channels in the list
@@ -13,12 +15,13 @@ Features
   - Lockout: skip a noisy/constant channel for the session
   - Priority channels: tick the ★ column on any channel(s); they are checked
     periodically while scanning and pre-empt the held channel
-  - Live dBFS signal meter with the active threshold marked
+  - Radio playhead: type any frequency in the banner and listen immediately
+  - Live dBFS signal meter with a draggable squelch threshold marker
   - Auto-noise-floor: sample empty in-band frequencies and set per-band squelch
-  - Read-back verification of every GQRX command, written to a verbose log that
-    can be tailed:  ./scanner.log (next to the app)
+  - Recordings tab: browse, play and edit past transmissions + transcripts
+  - Verbose log written to ./scanner.log (next to the app)
 
-Run:  /opt/homebrew/bin/python3 rf_hotscan.py
+Run:  .venv/bin/python rf_hotscan.py
 Tail: tail -f ./scanner.log (next to the app)
 """
 
@@ -1257,7 +1260,7 @@ class ScannerGUI:
     # ---- styling ----
     def _build_style(self):
         self.root.configure(bg=BG)
-        self.root.title("RF HotScan — GQRX Bookmark Scanner")
+        self.root.title("RF HotScan — SDR Bookmark Scanner")
         st = ttk.Style()
         try:
             st.theme_use("clam")
