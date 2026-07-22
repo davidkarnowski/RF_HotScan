@@ -404,3 +404,28 @@ the user asks.
   keep the history split clean.
 - STATE.md §12 records a small newly-noticed limitation (fallback STT guard
   compares provider names only), left as-is — out of scope.
+
+### WP3.6 closure (2026-07-22)
+
+- [x] **WP3.6** — live end-to-end on LBPD dispatch traffic (user's suggestion:
+      bursty real traffic beats continuous NWS). Two rounds, all criteria PASS:
+      real RF -> scan-loop hold -> clean-cut WAV -> Parakeet -> Ollama healer ->
+      healed columns + HEAL log lines. Round 2 additionally exercised the
+      junk-rescue dual-STT path live (empty Parakeet transcript + Voxtral
+      second opinion -> healed dispatch text) and the healer error surfacing
+      (Ollama cold-load timeout logged as `Healer error (ollama): timed out`).
+- **Bug found & fixed by this test:** circular import silently disabled healing
+  in-app — `stt.py` imported `healer` before defining `_load_dotenv`, which
+  `healer.py` calls at module level; the failed import left `stt.healer = None`
+  with no error. Import moved below `_load_dotenv()`; verified in both import
+  orders. (The offline stub test had masked this by monkeypatching
+  `stt.healer`.)
+- **Quality follow-ups observed (not in scope, for a future phase):**
+  1. Small Ollama models pollute output (markdown `**…**`, explanations,
+     answered a question instead of correcting it once) — prompt hardening
+     and/or output sanitization needed in `healer.py`.
+  2. First heal after model cold-load can exceed the 10 s timeout — consider a
+     warm-up ping or longer first-call timeout.
+  3. The live bookmarks file was rewritten by GQRX on 2026-07-19, stripping
+     ALL desc fields and tag colors (the documented data-loss risk, realized).
+     Descriptions need re-authoring, ideally kept in a backup GQRX can't touch.

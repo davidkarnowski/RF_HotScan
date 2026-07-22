@@ -23,11 +23,6 @@ import threading
 
 import clock
 
-try:
-    import healer
-except Exception:
-    healer = None
-
 
 def _load_dotenv():
     """Load KEY=VALUE lines from a .env next to this module into os.environ
@@ -55,6 +50,14 @@ def _load_dotenv():
 
 
 _load_dotenv()
+
+# Imported AFTER _load_dotenv is defined and run: healer.py calls
+# stt._load_dotenv() at its own module level, so importing it any earlier makes
+# the circular import fail and silently disables healing (healer = None).
+try:
+    import healer
+except Exception:
+    healer = None
 
 PARAKEET_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
 TARGET_SR = 16000
