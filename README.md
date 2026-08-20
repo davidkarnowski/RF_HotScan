@@ -141,6 +141,11 @@ The heatmap module can be executed headlessly without launching the GUI. This is
 
 ---
 
+## Deepwiki:
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/davidkarnowski/rf_hotscan)
+
+---
+
 ## License & Copyleft Note
 
 RF HotScan is distributed as open source. However, be aware of the dependencies:
